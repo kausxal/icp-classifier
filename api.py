@@ -371,6 +371,7 @@ ADMIN_TEMPLATE = """
                 <a href="/admin/clients" class="block py-3 px-4 rounded hover:bg-gray-800 {% if page == 'clients' %}bg-purple-700{% endif %}"><i class="fas fa-building mr-2"></i>Clients</a>
                 <a href="/admin/integrations" class="block py-3 px-4 rounded hover:bg-gray-800 {% if page == 'integrations' %}bg-purple-700{% endif %}"><i class="fas fa-plug mr-2"></i>Integrations</a>
                 <a href="/admin/logs" class="block py-3 px-4 rounded hover:bg-gray-800 {% if page == 'logs' %}bg-purple-700{% endif %}"><i class="fas fa-history mr-2"></i>Activity Logs</a>
+                <a href="/admin/settings" class="block py-3 px-4 rounded hover:bg-gray-800 {% if page == 'settings' %}bg-purple-700{% endif %}"><i class="fas fa-cog mr-2"></i>Settings</a>
             </nav>
             <div class="mt-auto pt-4 border-t border-gray-700">
                 <a href="/admin/logout" class="block py-2 px-4 rounded text-red-400 hover:bg-gray-800"><i class="fas fa-sign-out-alt mr-2"></i>Logout</a>
@@ -623,6 +624,91 @@ def logs(request: Request):
         </tr>"""
     content += "</tbody></table></div>"
     return render_admin("logs", content)
+
+
+@app.get("/admin/settings")
+def settings(request: Request):
+    if not verify_session(request):
+        return HTMLResponse(content='<script>window.location.href="/admin/login";</script>')
+    content = """
+    <div class="bg-white rounded-lg shadow p-6 mb-6">
+        <h3 class="text-lg font-bold mb-4">Change Password</h3>
+        <form method="post" action="/admin/settings/password" class="space-y-4">
+            <div>
+                <label class="block text-sm font-medium mb-2">Current Password</label>
+                <input type="password" name="current_password" class="w-full px-4 py-2 border rounded-lg" required>
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-2">New Password</label>
+                <input type="password" name="new_password" class="w-full px-4 py-2 border rounded-lg" required>
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-2">Confirm New Password</label>
+                <input type="password" name="confirm_password" class="w-full px-4 py-2 border rounded-lg" required>
+            </div>
+            <button type="submit" class="px-6 py-2 bg-purple-600 text-white rounded-lg">Update Password</button>
+        </form>
+    </div>
+    <div class="bg-white rounded-lg shadow p-6 mb-6">
+        <h3 class="text-lg font-bold mb-4">API Keys</h3>
+        <p class="text-gray-600 text-sm mb-4">Manage API keys for external integrations</p>
+        <a href="#" class="px-4 py-2 bg-green-600 text-white rounded-lg inline-block">Generate New API Key</a>
+    </div>
+    <div class="bg-white rounded-lg shadow p-6">
+        <h3 class="text-lg font-bold mb-4">Environment Variables</h3>
+        <div class="space-y-3">
+            <div class="flex justify-between items-center py-2 border-b">
+                <span class="font-medium">APOLLO_API_KEY</span>
+                <span class="text-green-500">""" + ("Configured" if APOLLO_API_KEY else "Not Set") + """</span>
+            </div>
+            <div class="flex justify-between items-center py-2 border-b">
+                <span class="font-medium">HUBSPOT_API_KEY</span>
+                <span class="text-green-500">""" + ("Configured" if HUBSPOT_API_KEY else "Not Set") + """</span>
+            </div>
+            <div class="flex justify-between items-center py-2 border-b">
+                <span class="font-medium">SALESFORCE_INSTANCE_URL</span>
+                <span class="text-green-500">""" + ("Configured" if SALESFORCE_INSTANCE_URL else "Not Set") + """</span>
+            </div>
+            <div class="flex justify-between items-center py-2 border-b">
+                <span class="font-medium">SALESFORCE_ACCESS_TOKEN</span>
+                <span class="text-green-500">""" + ("Configured" if SALESFORCE_ACCESS_TOKEN else "Not Set") + """</span>
+            </div>
+        </div>
+    </div>
+    """
+    return render_admin("settings", content)
+
+
+@app.post("/admin/settings/password")
+def change_password(request: Request, current_password: str = Form(...), new_password: str = Form(...), confirm_password: str = Form(...)):
+    if not verify_session(request):
+        return HTMLResponse(content='<script>window.location.href="/admin/login";</script>')
+    
+    username = request.session.get("username", "admin")
+    
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT password_hash FROM admin_users WHERE username = ?", (username,))
+    row = c.fetchone()
+    
+    if not row or row[0] != hash_password(current_password):
+        conn.close()
+        return HTMLResponse(content='<script>alert("Current password is incorrect"); window.location.href="/admin/settings";</script>')
+    
+    if new_password != confirm_password:
+        conn.close()
+        return HTMLResponse(content='<script>alert("New passwords do not match"); window.location.href="/admin/settings";</script>')
+    
+    if len(new_password) < 6:
+        conn.close()
+        return HTMLResponse(content='<script>alert("Password must be at least 6 characters"); window.location.href="/admin/settings";</script>')
+    
+    c.execute("UPDATE admin_users SET password_hash = ? WHERE username = ?", (hash_password(new_password), username))
+    conn.commit()
+    conn.close()
+    
+    log_activity("password_changed", f"Password changed for {username}")
+    return HTMLResponse(content='<script>alert("Password updated successfully"); window.location.href="/admin/settings";</script>')
 
 
 @app.post("/classify")
