@@ -1,264 +1,454 @@
-================================================================================
-ICP CLASSIFIER - LEAD SCORING AND ROUTING SYSTEM
-================================================================================
+# ICP Classifier
 
-WHAT IS THIS TOOL?
-------------------
-The ICP Classifier is a smart lead scoring system that helps GTM agencies 
-automatically evaluate and categorize leads based on each client's Ideal 
-Customer Profile. Think of it as an intelligent filter that sits between 
-your lead sources (Apollo) and your CRM (HubSpot/Salesforce).
+### Intelligent Lead Scoring & Routing System for GTM Agencies
 
-When a lead comes in, the system looks at company size, industry, funding 
-stage, technology they use, and job signals to calculate a score from 0-100. 
-Based on that score, it assigns a tier and tells you what to do next - route 
-to an AE, enroll in a nurture sequence, or discard.
+---
 
-WHY USE THIS?
--------------
-Manually reviewing every lead is time consuming and inconsistent. This system 
-gives you:
+## What Is This?
 
-1. Consistent Scoring - Every lead gets evaluated the same way using the exact 
-   same criteria you define
+The ICP Classifier is an automated lead scoring system that evaluates incoming leads against each client's Ideal Customer Profile (ICP). It sits between your lead sources (Apollo, Clay, manual uploads) and your CRM (HubSpot, Salesforce), automatically scoring, tiering, and routing leads based on rules you define.
 
-2. Automatic Tier Assignment - Leads are sorted into Tier 1 (hot), Tier 2 
-   (warm), or Not ICP automatically
+Think of it as a **smart filter** that every lead passes through before reaching your sales team.
 
-3. CRM Integration - Classified leads can be pushed directly to HubSpot or 
-   Salesforce with ICP score as custom fields
+```
+┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌─────────────┐
+│   Apollo    │────▶│ ICP Classifier│────▶│  Database   │     │  HubSpot    │
+│   (Leads)   │     │   (Scoring)   │     │  (Storage)  │     │  Salesforce │
+└─────────────┘     └──────────────┘     └──────────────┘     └─────────────┘
+                           │
+                           │ TIER 1 (Hot) ──────▶ Route to AE
+                           │ TIER 2 (Warm) ────▶ Nurture Sequence
+                           │ NOT ICP ──────────▶ Discard/Enrich
+```
 
-4. Full Audit Trail - Every classification is logged so you can see exactly 
-   why a lead was scored a certain way
+---
 
-5. Admin Dashboard - See your lead pipeline, tier distribution, and activity 
-   logs in one place
+## Why Use This?
 
-HOW THE SCORING WORKS
----------------------
-The system evaluates leads across 6 different signals, each weighted according 
-to your configuration:
+| Problem | Solution |
+|---------|----------|
+| Manual lead review takes hours | Auto-score every lead in seconds |
+| Inconsistent scoring across team | Same criteria, same rules, every time |
+| No visibility into lead quality | Dashboard shows tier distribution |
+| CRM fields not populated | Auto-push with ICP score, tier, confidence |
+| Don't know why leads score low | Signal breakdown shows exactly what matched |
 
-1. INDUSTRY (e.g., 30% of total score)
-   - Full points if the lead's industry matches your target industries
-   - Half points if the industry is adjacent (like "B2B SaaS" matching "SaaS")
-   - Zero points if there's no match
+---
 
-2. HEADCOUNT (e.g., 20% of total score)
-   - Full points if employee count is within your min-max range
-   - Half points if within 20% outside the range
-   - Zero points if far outside
+## How It Works
 
-3. FUNDING STAGE (e.g., 15% of total score)
-   - Full points if funding stage matches your target stages
-   - Zero otherwise
-   - If funding data is missing, it's flagged as a data gap
+### 1. Lead Comes In
 
-4. GEOGRAPHY (e.g., 15% of total score)
-   - Full points if HQ country/region matches your target geos
-   - Zero if no match
+Leads can enter the system from multiple sources:
 
-5. TECH STACK (e.g., 15% of total score)
-   - Full points if 2+ technologies match your target tech
-   - Half points if exactly 1 matches
-   - Zero if no matches
+```
+┌─────────────────────────────────────────────────────────┐
+│                    LEAD SOURCES                          │
+├─────────────────┬─────────────────┬───────────────────────┤
+│   Apollo CSV    │   Apollo        │   Direct API         │
+│   Export        │   Webhook       │   Call               │
+└─────────────────┴─────────────────┴───────────────────────┘
+```
 
-6. JOB SIGNALS (e.g., 5% of total score)
-   - Full points if job signals contain keywords like "Hiring SDRs" or 
-     "VP of Marketing"
-   - Half points if signals exist but don't match keywords
+### 2. System Scores the Lead
 
-DISQUALIFICATION RULES
-----------------------
-Before scoring, the system checks for hard disqualifiers. If any of these 
-are true, the lead gets "Disqualified" status immediately:
+The classifier evaluates each lead across 6 weighted signals:
 
-- Industry is in your disqualified list (like gambling, crypto)
-- Headcount is below your hard floor
-- The company is marked as a competitor
-- Domain is in your blocklist
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     SCORING ENGINE                          │
+│                                                              │
+│  INDUSTRY (30%)   ████████████████████                      │
+│  HEADCOUNT (20%)  ████████████                               │
+│  FUNDING (15%)    ████████                                   │
+│  GEOGRAPHY (15%)  ████████                                   │
+│  TECH STACK (15%) ████████                                   │
+│  JOB SIGNALS (5%) ██                                         │
+│                                                              │
+│  TOTAL SCORE: 85/100                                        │
+└─────────────────────────────────────────────────────────────┘
+```
 
-TIER ASSIGNMENTS
-----------------
-After scoring, leads are sorted into tiers based on your thresholds:
+#### Scoring Rules
 
-- TIER 1: Score >= T1 threshold (usually 70+) - These are your best fits, 
-  route directly to an AE
+| Signal | Full Points | Half Points | Zero Points |
+|--------|-------------|-------------|-------------|
+| **Industry** | Exact/semantic match | Adjacent (e.g., "B2B SaaS" → "SaaS") | No match |
+| **Headcount** | Within min-max range | Within 20% outside range | Far outside |
+| **Funding** | Matches target stages | — | No match |
+| **Geography** | HQ in target geo | — | No match |
+| **Tech Stack** | 2+ tech matches | 1 tech match | 0 matches |
+| **Job Signals** | Keywords match | Has signals, no keyword | No signals |
 
-- TIER 2: Score >= T2 threshold but below T1 (usually 40-69) - Good leads, 
-  put them in a nurture sequence
+### 3. Disqualification Check (Before Scoring)
 
-- NOT ICP: Score below T2 threshold - These don't match well, either 
-  discard or enrich with more data first
+If any hard rule fails, lead is immediately disqualified:
 
-- DISQUALIFIED: Failed one of the hard rules - Automatically discarded
+```
+┌────────────────────────────────────────┐
+│         DISQUALIFICATION RULES         │
+├────────────────────────────────────────┤
+│ ❌ Industry in disqualified list       │
+│ ❌ Headcount below hard floor          │
+│ ❌ is_competitor = true                │
+│ ❌ Domain in blocklist                 │
+└────────────────────────────────────────┘
+        │
+        ▼
+   TIER: "Disqualified"
+   ACTION: discard
+```
 
-CONFIDENCE SCORING
-------------------
-The system also tells you how confident it is in the classification:
+### 4. Tier Assignment
 
-- HIGH CONFIDENCE: At least 2 of the 3 data gaps are filled (tech, funding, 
-  signals) AND the score is at least 10 points away from the nearest threshold
+Based on score and configured thresholds:
 
-- MEDIUM CONFIDENCE: Either 3-4 data gaps exist OR the score is within 
-  10 points of a threshold
+```
+        0              40              70             100
+        │──────────────│──────────────│─────────────▶
+                     T2             T1
+        ┌─────────────┬──────────────┬──────────────┐
+        │  Not ICP   │    Tier 2    │   Tier 1     │
+        │  (Discard/ │  (Nurture)   │  (Route to   │
+        │  Enrich)   │              │    AE)       │
+        └─────────────┴──────────────┴──────────────┘
+```
 
-- LOW CONFIDENCE: 5+ data gaps exist OR enrichment data is sparse across 
-  multiple fields
+### 5. Routing
 
-WHAT TO DO NEXT (RECOMMENDED ACTIONS)
--------------------------------------
-Based on tier and confidence, the system recommends next steps:
+Leads are routed based on client configuration:
 
-- Tier 1 + High confidence: route_to_ae - Send directly to sales
-- Tier 1 + Medium/Low confidence: enrich_first - Get more data first
-- Tier 2: enroll_sequence - Add to nurture campaign
-- Not ICP + Data gaps present: enrich_first - Don't give up yet
-- Not ICP + No gaps: discard - Really not a fit
-- Disqualified: discard - Never show to sales
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    ROUTING OPTIONS                           │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   DATABASE           Always save to local SQLite            │
+│   ─────────────────────────────────────────────             │
+│   HUBSPOT            Push as Contact with custom fields:   │
+│                      - icp_score__c                         │
+│                      - icp_tier__c                          │
+│                      - icp_confidence__c                    │
+│   ─────────────────────────────────────────────             │
+│   SALESFORCE         Push as Contact with custom fields:   │
+│                      - ICP_Score__c                          │
+│                      - ICP_Tier__c                          │
+│                      - ICP_Confidence__c                    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
 
-GETTING STARTED
----------------
+---
 
-STEP 1: DEPLOY THE SYSTEM
-The easiest way is Vercel. Connect your GitHub repo to Vercel and it will 
-auto-deploy. You'll need to add these environment variables:
+## What You Get Back
 
-- APOLLO_API_KEY (optional, for auto-enrichment)
-- HUBSPOT_API_KEY (optional, for pushing to HubSpot)
-- SALESFORCE_INSTANCE_URL (optional, for Salesforce)
-- SALESFORCE_ACCESS_TOKEN (optional, for Salesforce)
+Every classification returns detailed information:
 
-STEP 2: CREATE AN API KEY
-Once deployed, make a POST call to create an API key:
-POST /admin/api-keys
-Body: {"label": "my-key"}
-
-STEP 3: CONFIGURE YOUR CLIENTS
-For each client, save their ICP configuration:
-POST /admin/client-configs
-Body: {
-  "client_id": "client_xyz",
-  "target_industries": ["SaaS", "MarTech"],
-  "hc_min": 50,
-  "hc_max": 500,
-  "target_funding_stages": ["Series A", "Series B"],
-  "target_geos": ["US", "UK"],
-  "target_tech": ["HubSpot", "Salesforce"],
-  "signal_keywords": ["Hiring SDRs", "VP Marketing"],
-  "t1_threshold": 70,
-  "t2_threshold": 40,
-  "weights": {
-    "industry": 30,
-    "headcount": 20,
-    "funding": 15,
-    "geo": 15,
-    "tech": 15,
-    "signals": 5
-  }
+```json
+{
+  "client_id": "acme_co",
+  "company": "Notion",
+  "score": 85,
+  "tier": "Tier 1",
+  "confidence": "high",
+  "signal_breakdown": {
+    "industry": { "score": 30, "max": 30, "matched": true },
+    "headcount": { "score": 20, "max": 20, "matched": true },
+    "funding": { "score": 15, "max": 15, "matched": true },
+    "geo": { "score": 15, "max": 15, "matched": true },
+    "tech": { "score": 5, "max": 15, "matched": true },
+    "signals": { "score": 0, "max": 5, "matched": false }
+  },
+  "signal_gaps": {
+    "tech": false,
+    "funding": false,
+    "signals": true
+  },
+  "reasons": [
+    "Industry matched: SaaS",
+    "Headcount in range: 400",
+    "Funding stage matched: Series C+",
+    "Geography matched: US"
+  ],
+  "recommended_action": "route_to_ae",
+  "slack_alert": true,
+  "sequence_id": "seq_t1_outbound_v3"
 }
+```
 
-STEP 4: SET UP ROUTING
-For each client, decide where classified leads should go:
-POST /admin/routing
-Body: {
-  "client_id": "client_xyz",
-  "route_to_db": true,
-  "route_to_hubspot": true,
-  "hubspot_pipeline": "default",
-  "hubspot_stage": "appointmentscheduled",
-  "route_to_salesforce": false
+---
+
+## Recommended Actions Matrix
+
+| Tier | Confidence | Action | What It Means |
+|------|------------|--------|---------------|
+| Tier 1 | High | `route_to_ae` | Best fit - send directly to sales |
+| Tier 1 | Medium/Low | `enrich_first` | Good fit but need more data |
+| Tier 2 | Any | `enroll_sequence` | Worth nurturing |
+| Not ICP | Has Gaps | `enrich_first` | Don't give up yet, try to get more info |
+| Not ICP | No Gaps | `discard` | Not a good fit |
+| Disqualified | Any | `discard` | Failed hard rules |
+
+---
+
+## Features
+
+### Core Capabilities
+
+- **Weighted Signal Scoring** - Customizable weights for each signal type
+- **Tier Assignment** - Automatic sorting into Tier 1, Tier 2, Not ICP, Disqualified
+- **Confidence Scoring** - High/Medium/Low based on data completeness
+- **Disqualification Rules** - Hard overrides that bypass scoring
+- **Signal Breakdown** - See exactly what matched and what didn't
+
+### Integrations
+
+- **Apollo** - Webhook for real-time classification, CSV import for batch processing
+- **HubSpot** - Push contacts with ICP custom fields
+- **Salesforce** - Push contacts with ICP custom fields
+
+### Admin Dashboard
+
+- **Dashboard** - Overview of leads, tiers, CRM pushes, weekly trends
+- **Leads** - Searchable, filterable list of all classified leads
+- **Clients** - Manage ICP configurations for each client
+- **Integrations** - Connect/disconnect Apollo, HubSpot, Salesforce
+- **Import** - Upload Apollo CSV exports for batch classification
+- **Activity Logs** - Full audit trail of all actions
+
+---
+
+## Quick Start
+
+### 1. Deploy to Vercel
+
+```
+GitHub Repo: https://github.com/kausxal/icp-classifier
+```
+
+Connect the repo to Vercel - it will auto-deploy.
+
+### 2. Add Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `APOLLO_API_KEY` | Optional | For auto-enrichment from Apollo |
+| `HUBSPOT_API_KEY` | Optional | For pushing to HubSpot |
+| `SALESFORCE_INSTANCE_URL` | Optional | For Salesforce (e.g., https://yourinstance.salesforce.com) |
+| `SALESFORCE_ACCESS_TOKEN` | Optional | Salesforce OAuth access token |
+
+### 3. Create an API Key
+
+```bash
+curl -X POST https://your-vercel-url.com/admin/api-keys \
+  -H "Content-Type: application/json" \
+  -d '{"label": "production"}'
+```
+
+### 4. Configure a Client
+
+```bash
+curl -X POST https://your-vercel-url.com/admin/client-configs \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "acme_co",
+    "target_industries": ["SaaS", "MarTech", "Fintech"],
+    "hc_min": 50,
+    "hc_max": 500,
+    "hard_hc_floor": 10,
+    "target_funding_stages": ["Series A", "Series B", "Series C+"],
+    "target_geos": ["US", "EU"],
+    "target_tech": ["HubSpot", "Salesforce", "Segment"],
+    "signal_keywords": ["Hiring SDRs", "VP Marketing", "Head of Revenue", "RevOps"],
+    "disqualified_industries": ["Gambling", "Crypto"],
+    "blocklist_domains": ["competitor.com"],
+    "t1_threshold": 70,
+    "t2_threshold": 40,
+    "weights": {
+      "industry": 30,
+      "headcount": 20,
+      "funding": 15,
+      "geo": 15,
+      "tech": 15,
+      "signals": 5
+    },
+    "tier_sequences": {
+      "Tier 1": "seq_t1_outbound_v3",
+      "Tier 2": "seq_t2_nurture_v1"
+    }
+  }'
+```
+
+### 5. Set Up Routing
+
+```bash
+curl -X POST https://your-vercel-url.com/admin/routing \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "acme_co",
+    "route_to_db": true,
+    "route_to_hubspot": true,
+    "hubspot_pipeline": "default",
+    "hubspot_stage": "appointmentscheduled",
+    "route_to_salesforce": false
+  }'
+```
+
+### 6. Import Leads
+
+1. Export leads from Apollo as CSV
+2. Go to `/admin/import` in the browser
+3. Upload CSV and select client
+4. System classifies all leads in batch
+
+---
+
+## API Endpoints
+
+### Main Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | System health check |
+| `POST` | `/classify` | Classify a single lead |
+| `POST` | `/webhook/apollo` | Apollo webhook handler |
+
+### Admin Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/admin/api-keys` | Create API key |
+| `POST` | `/admin/client-configs` | Save client ICP config |
+| `GET` | `/admin/client-configs/{id}` | Get client config |
+| `POST` | `/admin/routing` | Configure lead routing |
+| `GET` | `/admin/leads` | List all leads |
+| `GET` | `/admin/leads/{id}` | Get lead details |
+| `GET` | `/admin/stats` | Dashboard statistics |
+| `GET` | `/admin/logs` | Activity logs |
+
+---
+
+## Typical Workflow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        DAILY WORKFLOW                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. EXPORT        Export leads from Apollo                      │
+│       │                                                            │
+│       ▼                                                            │
+│  2. IMPORT        Upload CSV to /admin/import                    │
+│       │                                                            │
+│       ▼                                                            │
+│  3. CLASSIFY      System scores all leads against ICP            │
+│       │           • 80 become Tier 1 (Hot)                       │
+│       │           • 150 become Tier 2 (Warm)                    │
+│       │           • 270 become Not ICP                          │
+│       │                                                            │
+│       ▼                                                            │
+│  4. ROUTE         Based on routing config:                       │
+│       │           • Tier 1 → HubSpot/Salesforce                  │
+│       │           • All → Database                               │
+│       │                                                            │
+│       ▼                                                            │
+│  5. REVIEW        Check Dashboard for:                           │
+│                   • Total leads processed                        │
+│                   • Tier distribution                           │
+│                   • CRM push status                              │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Example Response
+
+A Tier 1 lead that routed to HubSpot:
+
+```json
+{
+  "client_id": "tech_startup",
+  "company": "Linear",
+  "score": 92,
+  "tier": "Tier 1",
+  "confidence": "high",
+  "signal_breakdown": {
+    "industry": { "score": 30, "max": 30, "matched": true },
+    "headcount": { "score": 20, "max": 20, "matched": true },
+    "funding": { "score": 15, "max": 15, "matched": true },
+    "geo": { "score": 15, "max": 15, "matched": true },
+    "tech": { "score": 10, "max": 15, "matched": true },
+    "signals": { "score": 2, "max": 5, "matched": true }
+  },
+  "signal_gaps": { "tech": false, "funding": false, "signals": false },
+  "reasons": [
+    "Industry matched: SaaS",
+    "Headcount in range: 50",
+    "Funding stage matched: Series A",
+    "Geography matched: US",
+    "Tech stack matched: 2 technologies",
+    "Job signals matched keywords"
+  ],
+  "recommended_action": "route_to_ae",
+  "lead_id": 142,
+  "hubspot_contact_id": "123456789",
+  "salesforce_contact_id": null,
+  "slack_alert": true,
+  "sequence_id": "seq_t1_outbound_v3"
 }
+```
 
-STEP 5: IMPORT LEADS
-Go to the Import page in the admin UI, upload a CSV exported from Apollo, 
-select the client, and the system will classify all leads in batch.
+---
 
-USING THE ADMIN DASHBOARD
--------------------------
-The system includes a full admin UI at /admin with these sections:
+## Tech Stack
 
-- Dashboard: See total leads, tier breakdown, CRM pushes, weekly stats
-- Leads: View all classified leads with filters and search
-- Clients: See all client ICP configurations
-- Integrations: Connect/disconnect Apollo, HubSpot, Salesforce
-- Import: Upload Apollo CSV exports for batch processing
-- Activity Logs: See everything that happened - classifications, CRM pushes, 
-  errors
+| Component | Technology |
+|-----------|------------|
+| Runtime | Python 3.11 |
+| Server | Vercel Serverless Functions |
+| Database | SQLite (local file) |
+| Authentication | API Key (Bearer Token) |
+| UI | HTML/Tailwind (built into API) |
 
-API REFERENCE
--------------
+---
 
-Main endpoints:
+## Need to Customize?
 
-GET /health
-- Returns system health status
+The scoring logic lives in `classifier.py`. You can adjust:
 
-POST /classify
-- Classify a single lead
-- Requires: client_id or client_config, and lead object
-- Returns: score, tier, confidence, signal_breakdown, recommended_action
+- How each signal is scored
+- What counts as a match
+- Adjacent industry matching
+- Confidence calculation
+- Tier thresholds
 
-POST /webhook/apollo
-- Webhook for Apollo events
-- Automatically enriches from Apollo and classifies
+The API logic and database handling is in `api.py`.
 
-POST /admin/client-configs
-- Save or update a client's ICP configuration
+---
 
-GET /admin/client-configs/{client_id}
-- Retrieve a client's ICP configuration
+## Production Recommendations
 
-POST /admin/routing
-- Configure where leads go (database, HubSpot, Salesforce)
+Before going live with high volume, consider adding:
 
-GET /admin/leads
-- List all leads in the database
-
-GET /admin/leads/{id}
-- Get details of a specific lead including signal breakdown
-
-GET /admin/stats
-- Get dashboard statistics
-
-POST /admin/api-keys
-- Create a new API key
-
-EXAMPLE WORKFLOW
-----------------
-Here's how a typical day might work:
-
-1. Your team exports 500 leads from Apollo
-2. You go to the Import page, upload the CSV, select client "tech_startup"
-3. The system processes all 500 leads:
-   - Each gets scored against the tech_startup ICP
-   - Scores range from 20 to 95
-   - 80 become Tier 1, 150 become Tier 2, 270 are Not ICP
-   - Based on routing config, all 80 Tier 1s get pushed to HubSpot
-4. You check the Dashboard and see the breakdown
-5. Your sales team in HubSpot sees the ICP_Score__c and ICP_Tier__c fields 
-   on each contact and knows which ones to prioritize
-
-TECHNICAL DETAILS
------------------
-- Built with Python and Vercel's serverless functions
-- Uses SQLite for local storage (leads, configs, logs)
-- API key authentication on all endpoints
-- All classification logic is in classifier.py - easy to modify scoring 
-  rules if needed
-- Response times are typically under 500ms
-
-SUPPORT
--------
-If you need to modify how scoring works, check classifier.py - all the 
-weighted signal logic is there. The api.py file handles the web server, 
-database, and integrations.
-
-For production use, consider adding:
-- Rate limiting to prevent abuse
-- Logging service like Datadog or New Relic
+- Rate limiting on API endpoints
+- Error monitoring (Datadog, Sentry)
 - Staging environment for testing config changes
-- Unit tests for the classifier logic
-- Redis for caching client configs if you have many clients
+- Unit tests for classifier logic
+- Redis caching for client configs (if you have many clients)
 
-================================================================================
+---
+
+## Support
+
+For questions or modifications:
+- Scoring logic: Check `classifier.py`
+- API and routing: Check `api.py`
+- Config format: See the example in "Configure a Client" section
+
+---
+
+**License:** MIT  
+**Repository:** https://github.com/kausxal/icp-classifier
