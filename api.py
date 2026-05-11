@@ -14,6 +14,8 @@ db_path = "classifier.db"
 
 APOLLO_API_KEY = os.environ.get("APOLLO_API_KEY", "")
 HUBSPOT_API_KEY = os.environ.get("HUBSPOT_API_KEY", "")
+SALESFORCE_INSTANCE_URL = os.environ.get("SALESFORCE_INSTANCE_URL", "")
+SALESFORCE_ACCESS_TOKEN = os.environ.get("SALESFORCE_ACCESS_TOKEN", "")
 
 
 def init_db():
@@ -71,6 +73,8 @@ def init_db():
             recommended_action TEXT,
             pushed_to_hubspot INTEGER DEFAULT 0,
             hubspot_contact_id TEXT,
+            pushed_to_salesforce INTEGER DEFAULT 0,
+            salesforce_contact_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -82,6 +86,9 @@ def init_db():
             route_to_hubspot INTEGER DEFAULT 0,
             hubspot_pipeline TEXT,
             hubspot_stage TEXT,
+            route_to_salesforce INTEGER DEFAULT 0,
+            salesforce_account_id TEXT,
+            salesforce_contact_owner_id TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -163,6 +170,39 @@ def push_to_hubspot(lead: dict, hubspot_config: dict) -> Optional[str]:
     return None
 
 
+def push_to_salesforce(lead: dict, salesforce_config: dict) -> Optional[str]:
+    if not SALESFORCE_INSTANCE_URL or not SALESFORCE_ACCESS_TOKEN:
+        return None
+
+    url = f"{SALESFORCE_INSTANCE_URL}/services/data/v59.0/sobjects/Contact"
+    headers = {
+        "Authorization": f"Bearer {SALESFORCE_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    contact_data = {
+        "FirstName": lead.get("first_name", ""),
+        "LastName": lead.get("last_name", ""),
+        "Email": lead.get("email", ""),
+        "Title": lead.get("title", ""),
+        "AccountId": salesforce_config.get("account_id", ""),
+        "OwnerId": salesforce_config.get("contact_owner_id", ""),
+        "ICP_Score__c": lead.get("score", ""),
+        "ICP_Tier__c": lead.get("tier", ""),
+        "ICP_Confidence__c": lead.get("confidence", ""),
+        "ICP_Action__c": lead.get("recommended_action", ""),
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=contact_data, timeout=10)
+        if resp.status_code in [200, 201]:
+            data = resp.json()
+            return data.get("id")
+    except:
+        pass
+    return None
+
+
 def save_lead(client_id: str, lead_data: dict, classification: dict, source: str = "api", source_id: str = "") -> int:
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -191,36 +231,56 @@ def route_lead(client_id: str, lead_data: dict, classification: dict):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("""
-        SELECT route_to_db, route_to_hubspot, hubspot_pipeline, hubspot_stage
+        SELECT route_to_db, route_to_hubspot, hubspot_pipeline, hubspot_stage,
+               route_to_salesforce, salesforce_account_id, salesforce_contact_owner_id
         FROM routing_config WHERE client_id = ?
     """, (client_id,))
     row = c.fetchone()
     conn.close()
 
-    routing = {"route_to_db": True, "route_to_hubspot": False}
+    routing = {"route_to_db": True, "route_to_hubspot": False, "route_to_salesforce": False}
     hubspot_config = {}
+    salesforce_config = {}
 
     if row:
-        routing = {"route_to_db": bool(row[0]), "route_to_hubspot": bool(row[1])}
+        routing = {
+            "route_to_db": bool(row[0]),
+            "route_to_hubspot": bool(row[1]),
+            "route_to_salesforce": bool(row[4])
+        }
         hubspot_config = {"pipeline": row[2], "stage": row[3]}
+        salesforce_config = {"account_id": row[5], "contact_owner_id": row[6]}
 
     lead_id = None
     hubspot_id = None
+    salesforce_id = None
 
     if routing["route_to_db"]:
         lead_id = save_lead(client_id, lead_data, classification)
 
     if routing["route_to_hubspot"]:
         hubspot_id = push_to_hubspot({**lead_data, **classification}, hubspot_config)
-        if hubspot_id and lead_id:
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            c.execute("UPDATE leads SET pushed_to_hubspot = 1, hubspot_contact_id = ? WHERE id = ?",
-                      (hubspot_id, lead_id))
-            conn.commit()
-            conn.close()
 
-    return {"lead_id": lead_id, "hubspot_contact_id": hubspot_id}
+    if routing["route_to_salesforce"]:
+        salesforce_id = push_to_salesforce({**lead_data, **classification}, salesforce_config)
+
+    if lead_id and (hubspot_id or salesforce_id):
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        updates = []
+        params = []
+        if hubspot_id:
+            updates.append("pushed_to_hubspot = 1, hubspot_contact_id = ?")
+            params.append(hubspot_id)
+        if salesforce_id:
+            updates.append("pushed_to_salesforce = 1, salesforce_contact_id = ?")
+            params.append(salesforce_id)
+        params.append(lead_id)
+        c.execute(f"UPDATE leads SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        conn.close()
+
+    return {"lead_id": lead_id, "hubspot_contact_id": hubspot_id, "salesforce_contact_id": salesforce_id}
 
 
 def handler(event, context):
@@ -268,11 +328,11 @@ def handler(event, context):
         }
 
         result = _classify(client_configs[client_id], lead)
-
         route_result = route_lead(client_id, lead, result)
 
         result["lead_id"] = route_result["lead_id"]
         result["hubspot_contact_id"] = route_result["hubspot_contact_id"]
+        result["salesforce_contact_id"] = route_result["salesforce_contact_id"]
 
         return {"statusCode": 200, "body": json.dumps(result)}
 
@@ -303,6 +363,7 @@ def handler(event, context):
             route_result = route_lead(client_id or config.get("client_id", "unknown"), lead, result)
             result["lead_id"] = route_result["lead_id"]
             result["hubspot_contact_id"] = route_result["hubspot_contact_id"]
+            result["salesforce_contact_id"] = route_result["salesforce_contact_id"]
 
         return {"statusCode": 200, "body": json.dumps(result)}
 
@@ -341,14 +402,20 @@ def handler(event, context):
         route_to_hubspot = data.get("route_to_hubspot", False)
         hubspot_pipeline = data.get("hubspot_pipeline", "")
         hubspot_stage = data.get("hubspot_stage", "")
+        route_to_salesforce = data.get("route_to_salesforce", False)
+        salesforce_account_id = data.get("salesforce_account_id", "")
+        salesforce_contact_owner_id = data.get("salesforce_contact_owner_id", "")
 
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
         c.execute("""
             INSERT OR REPLACE INTO routing_config 
-            (client_id, route_to_db, route_to_hubspot, hubspot_pipeline, hubspot_stage, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (client_id, int(route_to_db), int(route_to_hubspot), hubspot_pipeline, hubspot_stage, datetime.utcnow().isoformat()))
+            (client_id, route_to_db, route_to_hubspot, hubspot_pipeline, hubspot_stage, 
+             route_to_salesforce, salesforce_account_id, salesforce_contact_owner_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (client_id, int(route_to_db), int(route_to_hubspot), hubspot_pipeline, hubspot_stage,
+              int(route_to_salesforce), salesforce_account_id, salesforce_contact_owner_id,
+              datetime.utcnow().isoformat()))
         conn.commit()
         conn.close()
 
@@ -359,15 +426,18 @@ def handler(event, context):
         c = conn.cursor()
         c.execute("""
             SELECT id, client_id, company, email, score, tier, confidence, 
-                   recommended_action, pushed_to_hubspot, hubspot_contact_id, created_at
+                   recommended_action, pushed_to_hubspot, hubspot_contact_id,
+                   pushed_to_salesforce, salesforce_contact_id, created_at
             FROM leads ORDER BY created_at DESC LIMIT 100
         """)
         rows = c.fetchall()
         conn.close()
         results = [{
             "id": r[0], "client_id": r[1], "company": r[2], "email": r[3], "score": r[4],
-            "tier": r[5], "confidence": r[6], "action": r[7], "hubspot_pushed": bool(r[8]),
-            "hubspot_id": r[9], "created_at": r[10]
+            "tier": r[5], "confidence": r[6], "action": r[7], 
+            "hubspot_pushed": bool(r[8]), "hubspot_id": r[9],
+            "salesforce_pushed": bool(r[10]), "salesforce_id": r[11],
+            "created_at": r[12]
         } for r in rows]
         return {"statusCode": 200, "body": json.dumps(results)}
 
@@ -385,7 +455,8 @@ def handler(event, context):
             "funding_stage": row[7], "hq_country": row[8], "tech_stack": json.loads(row[10] or "[]"),
             "job_signals": json.loads(row[11] or "[]"), "email": row[12], "first_name": row[13],
             "last_name": row[14], "title": row[15]
-        }, "classification": {"score": row[16], "tier": row[17], "confidence": row[18], "action": row[19]}})}
+        }, "classification": {"score": row[16], "tier": row[17], "confidence": row[18], "action": row[19]},
+        "integrations": {"hubspot_id": row[21], "salesforce_id": row[23]}}})}
 
     if method == "GET" and path.startswith("/admin/classifications"):
         conn = sqlite3.connect(db_path)
