@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #f3f4f6;
+}
+
+.sidebar-link {
+  @apply block py-3 px-4 rounded hover:bg-gray-800 transition-colors;
+}
+
+.sidebar-link.active {
+  @apply bg-purple-700;
+}

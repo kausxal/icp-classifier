@@ -528,13 +528,16 @@ def clients(request: Request):
     c = conn.cursor()
     c.execute("SELECT client_id, config_json, updated_at FROM client_configs")
     rows = c.fetchall()
-    c.execute("SELECT client_id, route_to_hubspot, route_to_salesforce FROM routing_config")
-    routing = {r[0]: {"hubspot": r[1], "salesforce": r[2]} for r in c.fetchall()}
+    c.execute("SELECT client_id, route_to_hubspot, route_to_salesforce, hubspot_pipeline, hubspot_stage FROM routing_config")
+    routing = {r[0]: {"hubspot": r[1], "salesforce": r[2], "pipeline": r[3], "stage": r[4]} for r in c.fetchall()}
     conn.close()
-    content = '<div class="grid grid-cols-1 md:grid-cols-2 gap-6">'
+    content = '''<div class="mb-4 flex justify-between">
+        <button onclick="document.getElementById('addClientModal').classList.remove('hidden')" class="px-4 py-2 bg-purple-600 text-white rounded-lg">+ Add Client</button>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">'''
     for r in rows:
         config = json.loads(r[1])
-        rt = routing.get(r[0], {"hubspot": 0, "salesforce": 0})
+        rt = routing.get(r[0], {"hubspot": 0, "salesforce": 0, "pipeline": "", "stage": ""})
         content += f"""<div class="bg-white p-6 rounded-lg shadow">
             <div class="flex justify-between items-start">
                 <h3 class="text-xl font-bold">{r[0]}</h3>
@@ -544,12 +547,71 @@ def clients(request: Request):
                 <div><span class="text-gray-500">Industries:</span> {', '.join(config.get('target_industries', []))}</div>
                 <div><span class="text-gray-500">Headcount:</span> {config.get('hc_min', 0)} - {config.get('hc_max', 0)}</div>
                 <div><span class="text-gray-500">T1 Threshold:</span> {config.get('t1_threshold', 70)}</div>
-                <div><span class="text-gray-500">HubSpot:</span> {'<i class="fas fa-check text-green-500"></i>' if rt['hubspot'] else '<i class="fas fa-times text-red-400"></i>'}</div>
-                <div><span class="text-gray-500">Salesforce:</span> {'<i class="fas fa-check text-green-500"></i>' if rt['salesforce'] else '<i class="fas fa-times text-red-400"></i>'}</div>
+                <div class="flex gap-4 mt-2">
+                    <span class="flex items-center gap-1">HubSpot: {'<i class="fas fa-check text-green-500"></i>' if rt['hubspot'] else '<i class="fas fa-times text-red-400"></i>'}</span>
+                    <span class="flex items-center gap-1">Salesforce: {'<i class="fas fa-check text-green-500"></i>' if rt['salesforce'] else '<i class="fas fa-times text-red-400"></i>'}</span>
+                </div>
             </div>
+            <button onclick="editClient('{r[0]}')" class="mt-4 w-full py-2 bg-gray-100 rounded-lg hover:bg-gray-200">Configure</button>
         </div>"""
-    content += "</div>"
+    content += """</div>
+    <div id="addClientModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-white rounded-lg p-6 w-full max-w-lg">
+            <h3 class="text-xl font-bold mb-4">Add New Client</h3>
+            <form method="post" action="/admin/clients/add" class="space-y-4">
+                <div><label class="block text-sm font-medium">Client ID</label><input type="text" name="client_id" class="w-full px-4 py-2 border rounded-lg" required></div>
+                <div><label class="block text-sm font-medium">Target Industries (comma separated)</label><input type="text" name="target_industries" placeholder="SaaS, MarTech, Fintech" class="w-full px-4 py-2 border rounded-lg" required></div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium">Min Headcount</label><input type="number" name="hc_min" value="10" class="w-full px-4 py-2 border rounded-lg"></div>
+                    <div><label class="block text-sm font-medium">Max Headcount</label><input type="number" name="hc_max" value="500" class="w-full px-4 py-2 border rounded-lg"></div>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium">T1 Threshold</label><input type="number" name="t1_threshold" value="70" class="w-full px-4 py-2 border rounded-lg"></div>
+                    <div><label class="block text-sm font-medium">T2 Threshold</label><input type="number" name="t2_threshold" value="40" class="w-full px-4 py-2 border rounded-lg"></div>
+                </div>
+                <div><label class="block text-sm font-medium">Target Funding Stages (comma)</label><input type="text" name="target_funding_stages" placeholder="Series A, Series B" class="w-full px-4 py-2 border rounded-lg"></div>
+                <div class="flex gap-4 mt-4">
+                    <label class="flex items-center"><input type="checkbox" name="route_to_hubspot" class="mr-2"> Route to HubSpot</label>
+                    <label class="flex items-center"><input type="checkbox" name="route_to_salesforce" class="mr-2"> Route to Salesforce</label>
+                </div>
+                <div class="flex gap-2 mt-4">
+                    <button type="submit" class="px-4 py-2 bg-purple-600 text-white rounded-lg">Save Client</button>
+                    <button type="button" onclick="document.getElementById('addClientModal').classList.add('hidden')" class="px-4 py-2 bg-gray-200 rounded-lg">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>"""
     return render_admin("clients", content)
+
+
+@app.post("/admin/clients/add")
+def add_client(request: Request, client_id: str = Form(...), target_industries: str = Form(...), hc_min: int = Form(10), hc_max: int = Form(500), t1_threshold: int = Form(70), t2_threshold: int = Form(40), target_funding_stages: str = Form(""), route_to_hubspot: bool = Form(False), route_to_salesforce: bool = Form(False)):
+    if not verify_session(request):
+        return HTMLResponse(content='<script>window.location.href="/admin/login";</script>')
+    
+    config = {
+        "client_id": client_id,
+        "target_industries": [x.strip() for x in target_industries.split(",")],
+        "hc_min": hc_min,
+        "hc_max": hc_max,
+        "t1_threshold": t1_threshold,
+        "t2_threshold": t2_threshold,
+        "target_funding_stages": [x.strip() for x in target_funding_stages.split(",")] if target_funding_stages else [],
+        "target_geos": ["US", "EU"],
+        "target_tech": [],
+        "signal_keywords": [],
+        "weights": {"industry": 30, "headcount": 20, "funding": 15, "geo": 15, "tech": 15, "signals": 5}
+    }
+    
+    client_configs[client_id] = config
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO client_configs (client_id, config_json, updated_at) VALUES (?, ?, ?)", (client_id, json.dumps(config), datetime.utcnow().isoformat()))
+    c.execute("INSERT OR REPLACE INTO routing_config (client_id, route_to_db, route_to_hubspot, route_to_salesforce, updated_at) VALUES (?, 1, ?, ?, ?)", (client_id, int(route_to_hubspot), int(route_to_salesforce), datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
+    log_activity("client_added", f"Added client: {client_id}", client_id=client_id)
+    return HTMLResponse(content='<script>window.location.href="/admin/clients";</script>')
 
 
 @app.get("/admin/integrations")
@@ -570,34 +632,50 @@ def integrations(request: Request):
         <div class="bg-white p-6 rounded-lg shadow">
             <div class="flex items-center justify-between mb-4">
                 <h3 class="text-xl font-bold"><i class="fas fa-database mr-2"></i>Apollo</h3>
-                <span class="px-3 py-1 rounded-full text-sm {'bg-green-100 text-green-800' if apollo_st=='connected' else 'bg-gray-100 text-gray-600'}">{apollo_st}</span>
+                <span class="px-3 py-1 rounded-full text-sm {'bg-green-100 text-green-800' if APOLLO_API_KEY else 'bg-red-100 text-red-800'}">{('connected' if APOLLO_API_KEY else 'Not Connected')}</span>
             </div>
             <p class="text-gray-600 text-sm mb-4">Lead enrichment and webhook integration</p>
-            <div class="text-sm">
-                <div class="flex justify-between py-2 border-b"><span>API Key</span><span class="text-green-500">{'Configured' if APOLLO_API_KEY else 'Missing'}</span></div>
+            <div class="text-sm space-y-2">
+                <div class="flex justify-between py-2 border-b"><span>API Key</span><span class="{'text-green-500' if APOLLO_API_KEY else 'text-red-500'}">{'Configured' if APOLLO_API_KEY else 'Set via Environment Variable'}</span></div>
+                <p class="text-xs text-gray-400 mt-2">Set APOLLO_API_KEY in Vercel environment variables</p>
             </div>
         </div>
         <div class="bg-white p-6 rounded-lg shadow">
             <div class="flex items-center justify-between mb-4">
                 <h3 class="text-xl font-bold"><i class="fab fa-hubspot mr-2" style="color:#ff7a59"></i>HubSpot</h3>
-                <span class="px-3 py-1 rounded-full text-sm {'bg-green-100 text-green-800' if hubspot_st=='connected' else 'bg-gray-100 text-gray-600'}">{hubspot_st}</span>
+                <span class="px-3 py-1 rounded-full text-sm {'bg-green-100 text-green-800' if HUBSPOT_API_KEY else 'bg-red-100 text-red-800'}">{('connected' if HUBSPOT_API_KEY else 'Not Connected')}</span>
             </div>
             <p class="text-gray-600 text-sm mb-4">Push leads to HubSpot contacts</p>
-            <div class="text-sm">
-                <div class="flex justify-between py-2 border-b"><span>API Key</span><span class="text-green-500">{'Configured' if HUBSPOT_API_KEY else 'Missing'}</span></div>
+            <div class="text-sm space-y-2">
+                <div class="flex justify-between py-2 border-b"><span>API Key</span><span class="{'text-green-500' if HUBSPOT_API_KEY else 'text-red-500'}">{'Configured' if HUBSPOT_API_KEY else 'Set via Environment Variable'}</span></div>
+                <p class="text-xs text-gray-400 mt-2">Set HUBSPOT_API_KEY in Vercel environment variables</p>
             </div>
+            <form method="post" action="/admin/integrations/test/hubspot" class="mt-4">
+                <button type="submit" class="w-full py-2 bg-orange-100 text-orange-700 rounded-lg hover:bg-orange-200">Test Connection</button>
+            </form>
         </div>
         <div class="bg-white p-6 rounded-lg shadow">
             <div class="flex items-center justify-between mb-4">
                 <h3 class="text-xl font-bold"><i class="fab fa-salesforce mr-2" style="color:#00a1e0"></i>Salesforce</h3>
-                <span class="px-3 py-1 rounded-full text-sm {'bg-green-100 text-green-800' if sf_st=='connected' else 'bg-gray-100 text-gray-600'}">{sf_st}</span>
+                <span class="px-3 py-1 rounded-full text-sm {'bg-green-100 text-green-800' if SALESFORCE_ACCESS_TOKEN else 'bg-red-100 text-red-800'}">{('connected' if SALESFORCE_ACCESS_TOKEN else 'Not Connected')}</span>
             </div>
             <p class="text-gray-600 text-sm mb-4">Push leads to Salesforce contacts</p>
-            <div class="text-sm">
-                <div class="flex justify-between py-2 border-b"><span>Instance URL</span><span class="text-green-500">{'Configured' if SALESFORCE_INSTANCE_URL else 'Missing'}</span></div>
-                <div class="flex justify-between py-2 border-b"><span>Access Token</span><span class="text-green-500">{'Configured' if SALESFORCE_ACCESS_TOKEN else 'Missing'}</span></div>
+            <div class="text-sm space-y-2">
+                <div class="flex justify-between py-2 border-b"><span>Instance URL</span><span class="{'text-green-500' if SALESFORCE_INSTANCE_URL else 'text-red-500'}">{'Configured' if SALESFORCE_INSTANCE_URL else 'Not Set'}</span></div>
+                <div class="flex justify-between py-2 border-b"><span>Access Token</span><span class="{'text-green-500' if SALESFORCE_ACCESS_TOKEN else 'text-red-500'}">{'Configured' if SALESFORCE_ACCESS_TOKEN else 'Not Set'}</span></div>
+                <p class="text-xs text-gray-400 mt-2">Set SALESFORCE_INSTANCE_URL and SALESFORCE_ACCESS_TOKEN in Vercel</p>
             </div>
         </div>
+    </div>
+    <div class="mt-8 bg-blue-50 p-4 rounded-lg">
+        <h4 class="font-bold text-blue-800 mb-2">How to Configure Integrations</h4>
+        <ol class="text-sm text-blue-700 space-y-1 list-decimal list-inside">
+            <li>Go to your Vercel project settings</li>
+            <li>Navigate to Environment Variables</li>
+            <li>Add the required API keys (APOLLO_API_KEY, HUBSPOT_API_KEY, etc.)</li>
+            <li>Redeploy the application</li>
+            <li>Return here to see connected status</li>
+        </ol>
     </div>"""
     return render_admin("integrations", content)
 
