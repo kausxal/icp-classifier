@@ -1,11 +1,5 @@
 {
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api.py" },
-    { "source": "/admin/(.*)", "destination": "/api.py" },
-    { "source": "/health", "destination": "/api.py" },
-    { "source": "/classify", "destination": "/api.py" },
-    { "source": "/docs", "destination": "/api.py" },
-    { "source": "/openapi.json", "destination": "/api.py" },
-    { "source": "/(.*)", "destination": "/index.html" }
-  ]
+  "installCommand": "cd frontend && npm install",
+  "buildCommand": "cd frontend && npm run build",
+  "outputDirectory": "frontend/dist"
 }
