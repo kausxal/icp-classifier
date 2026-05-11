@@ -4,15 +4,11 @@
     {
       "src": "api.py",
       "use": "@vercel/python"
-    },
-    {
-      "src": "frontend/dist",
-      "use": "@vercel/static"
     }
   ],
   "routes": [
     {
-      "src": "/api/admin/(.*)",
+      "src": "/api/(.*)",
       "dest": "api.py"
     },
     {
@@ -28,11 +24,12 @@
       "dest": "api.py"
     },
     {
-      "src": "/(.*)",
-      "dest": "frontend/dist/index.html"
+      "src": "/docs",
+      "dest": "api.py"
+    },
+    {
+      "src": "/openapi.json",
+      "dest": "api.py"
     }
-  ],
-  "outputDirectory": "frontend/dist",
-  "buildCommand": "cd frontend && npm install && npm run build",
-  "installCommand": "cd frontend && npm install"
+  ]
 }
