@@ -6,12 +6,15 @@ import secrets
 import os
 import requests
 from classifier import classify_lead as _classify
+import hashlib
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request, Response, Form
 from fastapi.responses import HTMLResponse
-from typing import Optional
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
 app = FastAPI(title="ICP Classifier")
+app.add_middleware(SessionMiddleware, secret_key=secrets.token_hex(32))
 
 client_configs = {}
 API_KEYS = {}
@@ -24,6 +27,11 @@ HUBSPOT_API_KEY = os.environ.get("HUBSPOT_API_KEY", "")
 SALESFORCE_INSTANCE_URL = os.environ.get("SALESFORCE_INSTANCE_URL", "")
 SALESFORCE_ACCESS_TOKEN = os.environ.get("SALESFORCE_ACCESS_TOKEN", "")
 
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
 def init_db():
     conn = sqlite3.connect(db_path)
@@ -124,17 +132,17 @@ def init_db():
         )
     """)
     c.execute("""
-        CREATE TABLE IF NOT EXISTS batch_imports (
+        CREATE TABLE IF NOT EXISTS admin_users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT,
-            total_records INTEGER,
-            processed INTEGER,
-            succeeded INTEGER,
-            failed INTEGER,
-            status TEXT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    c.execute("SELECT COUNT(*) FROM admin_users")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO admin_users (username, password_hash) VALUES (?, ?)", 
+                  ("admin", hash_password("admin123")))
     conn.commit()
     conn.close()
 
@@ -161,26 +169,17 @@ def load_configs():
 load_configs()
 
 
+def verify_session(request: Request) -> bool:
+    return request.session.get("authenticated", False)
+
+
 def log_activity(action: str, details: str = "", lead_id: str = "", client_id: str = "", status: str = "success"):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("""
-        INSERT INTO activity_logs (action, details, lead_id, client_id, status)
-        VALUES (?, ?, ?, ?, ?)
-    """, (action, details, lead_id, client_id, status))
+    c.execute("INSERT INTO activity_logs (action, details, lead_id, client_id, status) VALUES (?, ?, ?, ?, ?)",
+              (action, details, lead_id, client_id, status))
     conn.commit()
     conn.close()
-
-
-def verify_api_key(authorization: Optional[str] = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid Authorization format")
-    key = authorization[7:]
-    if key not in API_KEYS:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    return key
 
 
 def parse_headcount(hc_str: str) -> Optional[int]:
@@ -197,7 +196,7 @@ def parse_headcount(hc_str: str) -> Optional[int]:
 
 def push_to_hubspot(lead: dict, hubspot_config: dict) -> Optional[str]:
     if not HUBSPOT_API_KEY:
-        log_activity("hubspot_push", "HubSpot API key not configured", status="failed")
+        log_activity("hubspot_push", "HubSpot not configured", status="failed")
         return None
     url = "https://api.hubapi.com/crm/v3/objects/contacts"
     headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
@@ -211,19 +210,14 @@ def push_to_hubspot(lead: dict, hubspot_config: dict) -> Optional[str]:
         "icp_tier": lead.get("tier", ""),
         "icp_confidence": lead.get("confidence", ""),
     }
-    if hubspot_config.get("pipeline"):
-        properties["pipeline"] = hubspot_config["pipeline"]
-    if hubspot_config.get("stage"):
-        properties["dealstage"] = hubspot_config["stage"]
     try:
         resp = requests.post(url, headers=headers, json={"properties": properties}, timeout=10)
         if resp.status_code in [200, 201]:
-            log_activity("hubspot_push", f"Pushed lead to HubSpot: {lead.get('email')}", status="success")
+            log_activity("hubspot_push", f"Pushed: {lead.get('email')}", status="success")
             return resp.json().get("id")
-        else:
-            log_activity("hubspot_push", f"HubSpot error: {resp.text}", status="failed")
+        log_activity("hubspot_push", f"Error: {resp.text}", status="failed")
     except Exception as e:
-        log_activity("hubspot_push", f"HubSpot exception: {str(e)}", status="failed")
+        log_activity("hubspot_push", str(e), status="failed")
     return None
 
 
@@ -239,108 +233,69 @@ def push_to_salesforce(lead: dict, salesforce_config: dict) -> Optional[str]:
         "Email": lead.get("email", ""),
         "Title": lead.get("title", ""),
         "AccountId": salesforce_config.get("account_id", ""),
-        "OwnerId": salesforce_config.get("contact_owner_id", ""),
-        "ICP_Score__c": lead.get("score", ""),
+        "ICP_Score__c": str(lead.get("score", "")),
         "ICP_Tier__c": lead.get("tier", ""),
-        "ICP_Confidence__c": lead.get("confidence", ""),
     }
     try:
         resp = requests.post(url, headers=headers, json=contact_data, timeout=10)
         if resp.status_code in [200, 201]:
-            log_activity("salesforce_push", f"Pushed lead to Salesforce: {lead.get('email')}", status="success")
+            log_activity("salesforce_push", f"Pushed: {lead.get('email')}", status="success")
             return resp.json().get("id")
-        else:
-            log_activity("salesforce_push", f"Salesforce error: {resp.text}", status="failed")
+        log_activity("salesforce_push", f"Error: {resp.text}", status="failed")
     except Exception as e:
-        log_activity("salesforce_push", f"Salesforce exception: {str(e)}", status="failed")
+        log_activity("salesforce_push", str(e), status="failed")
     return None
 
 
-def save_lead(client_id: str, lead_data: dict, classification: dict, source: str = "api", source_id: str = "") -> int:
+def save_lead(client_id: str, lead_data: dict, classification: dict) -> int:
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("""
-        INSERT INTO leads (
-            client_id, source, source_id, company, domain, industry, headcount,
-            funding_stage, hq_country, hq_region, tech_stack, job_signals,
-            email, first_name, last_name, title, phone, score, tier, confidence, 
-            recommended_action, signal_breakdown, reasons
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        client_id, source, source_id, lead_data.get("company"), lead_data.get("domain"),
-        lead_data.get("industry"), lead_data.get("headcount"), lead_data.get("funding_stage"),
-        lead_data.get("hq_country"), lead_data.get("hq_region"),
-        json.dumps(lead_data.get("tech_stack", [])), json.dumps(lead_data.get("job_signals", [])),
-        lead_data.get("email"), lead_data.get("first_name"), lead_data.get("last_name"),
-        lead_data.get("title"), lead_data.get("phone"), classification.get("score"), 
-        classification.get("tier"), classification.get("confidence"),
-        classification.get("recommended_action"), json.dumps(classification.get("signal_breakdown", {})),
-        json.dumps(classification.get("reasons", []))
-    ))
+    c.execute("""INSERT INTO leads (client_id, company, domain, industry, headcount, funding_stage, hq_country, hq_region, tech_stack, job_signals, email, first_name, last_name, title, phone, score, tier, confidence, recommended_action, signal_breakdown, reasons) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (client_id, lead_data.get("company"), lead_data.get("domain"), lead_data.get("industry"), lead_data.get("headcount"), lead_data.get("funding_stage"), lead_data.get("hq_country"), lead_data.get("hq_region"), json.dumps(lead_data.get("tech_stack", [])), json.dumps(lead_data.get("job_signals", [])), lead_data.get("email"), lead_data.get("first_name"), lead_data.get("last_name"), lead_data.get("title"), lead_data.get("phone"), classification.get("score"), classification.get("tier"), classification.get("confidence"), classification.get("recommended_action"), json.dumps(classification.get("signal_breakdown", {})), json.dumps(classification.get("reasons", []))))
     lead_id = c.lastrowid
     conn.commit()
     conn.close()
-    log_activity("lead_saved", f"Saved lead: {lead_data.get('company')}", str(lead_id), client_id)
+    log_activity("lead_saved", f"Saved: {lead_data.get('company')}", str(lead_id), client_id)
     return lead_id
 
 
 def route_lead(client_id: str, lead_data: dict, classification: dict):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("""
-        SELECT route_to_db, route_to_hubspot, hubspot_pipeline, hubspot_stage,
-               route_to_salesforce, salesforce_account_id, salesforce_contact_owner_id
-        FROM routing_config WHERE client_id = ?
-    """, (client_id,))
+    c.execute("SELECT route_to_db, route_to_hubspot, hubspot_pipeline, hubspot_stage, route_to_salesforce, salesforce_account_id FROM routing_config WHERE client_id = ?", (client_id,))
     row = c.fetchone()
     conn.close()
-
     routing = {"route_to_db": True, "route_to_hubspot": False, "route_to_salesforce": False}
-    hubspot_config = {}
-    salesforce_config = {}
-
+    hubspot_cfg, sf_cfg = {}, {}
     if row:
         routing = {"route_to_db": bool(row[0]), "route_to_hubspot": bool(row[1]), "route_to_salesforce": bool(row[4])}
-        hubspot_config = {"pipeline": row[2], "stage": row[3]}
-        salesforce_config = {"account_id": row[5], "contact_owner_id": row[6]}
-
-    lead_id = None
-    hubspot_id = None
-    salesforce_id = None
-
-    if routing["route_to_db"]:
-        lead_id = save_lead(client_id, lead_data, classification)
-
-    if routing["route_to_hubspot"]:
-        hubspot_id = push_to_hubspot({**lead_data, **classification}, hubspot_config)
-
-    if routing["route_to_salesforce"]:
-        salesforce_id = push_to_salesforce({**lead_data, **classification}, salesforce_config)
-
-    if lead_id and (hubspot_id or salesforce_id):
+        hubspot_cfg = {"pipeline": row[2], "stage": row[3]}
+        sf_cfg = {"account_id": row[5]}
+    lead_id = save_lead(client_id, lead_data, classification) if routing["route_to_db"] else None
+    hubspot_id = push_to_hubspot({**lead_data, **classification}, hubspot_cfg) if routing["route_to_hubspot"] else None
+    sf_id = push_to_salesforce({**lead_data, **classification}, sf_cfg) if routing["route_to_salesforce"] else None
+    if lead_id and (hubspot_id or sf_id):
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
-        updates = []
-        params = []
+        updates, params = [], []
         if hubspot_id:
-            updates.append("pushed_to_hubspot = 1, hubspot_contact_id = ?")
+            updates.append("pushed_to_hubspot=1, hubspot_contact_id=?")
             params.append(hubspot_id)
-        if salesforce_id:
-            updates.append("pushed_to_salesforce = 1, salesforce_contact_id = ?")
-            params.append(salesforce_id)
+        if sf_id:
+            updates.append("pushed_to_salesforce=1, salesforce_contact_id=?")
+            params.append(sf_id)
         params.append(lead_id)
         c.execute(f"UPDATE leads SET {', '.join(updates)} WHERE id = ?", params)
         conn.commit()
         conn.close()
-
-    return {"lead_id": lead_id, "hubspot_contact_id": hubspot_id, "salesforce_contact_id": salesforce_id}
+    return {"lead_id": lead_id, "hubspot_contact_id": hubspot_id, "salesforce_contact_id": sf_id}
 
 
 def get_dashboard_stats():
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM leads")
-    total_leads = c.fetchone()[0]
+    total = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM leads WHERE tier = 'Tier 1'")
     tier1 = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM leads WHERE tier = 'Tier 2'")
@@ -348,26 +303,51 @@ def get_dashboard_stats():
     c.execute("SELECT COUNT(*) FROM leads WHERE tier = 'Not ICP'")
     not_icp = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM leads WHERE pushed_to_hubspot = 1")
-    hubspot_pushed = c.fetchone()[0]
+    hubspot = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM leads WHERE pushed_to_salesforce = 1")
-    salesforce_pushed = c.fetchone()[0]
+    salesforce = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM leads WHERE created_at >= date('now', '-7 days')")
-    last_7_days = c.fetchone()[0]
-    c.execute("SELECT tier, COUNT(*) as count FROM leads GROUP BY tier")
+    week = c.fetchone()[0]
+    c.execute("SELECT tier, COUNT(*) FROM leads GROUP BY tier")
     tier_dist = c.fetchall()
-    c.execute("SELECT client_id, COUNT(*) as count FROM leads GROUP BY client_id ORDER BY count DESC LIMIT 5")
+    c.execute("SELECT client_id, COUNT(*) FROM leads GROUP BY client_id ORDER BY COUNT(*) DESC LIMIT 5")
     top_clients = c.fetchall()
     conn.close()
-    return {
-        "total_leads": total_leads, "tier1": tier1, "tier2": tier2, "not_icp": not_icp,
-        "hubspot_pushed": hubspot_pushed, "salesforce_pushed": salesforce_pushed,
-        "last_7_days": last_7_days,
-        "tier_dist": [{"tier": r[0], "count": r[1]} for r in tier_dist],
-        "top_clients": [{"client_id": r[0], "count": r[1]} for r in top_clients]
-    }
+    return {"total_leads": total, "tier1": tier1, "tier2": tier2, "not_icp": not_icp, "hubspot_pushed": hubspot, "salesforce_pushed": salesforce, "last_7_days": week, "tier_dist": [{"tier": r[0], "count": r[1]} for r in tier_dist], "top_clients": [{"client_id": r[0], "count": r[1]} for r in top_clients]}
 
 
-HTML_TEMPLATE = """
+LOGIN_PAGE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - ICP Classifier</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gradient-to-br from-purple-600 to-indigo-700 min-h-screen flex items-center justify-center">
+    <div class="bg-white rounded-2xl shadow-2xl p-8 w-96">
+        <h1 class="text-3xl font-bold text-center mb-8 text-gray-800">ICP Classifier</h1>
+        <form method="post">
+            <div class="mb-4">
+                <label class="block text-gray-700 text-sm font-bold mb-2">Username</label>
+                <input type="text" name="username" class="w-full px-4 py-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500" required>
+            </div>
+            <div class="mb-6">
+                <label class="block text-gray-700 text-sm font-bold mb-2">Password</label>
+                <input type="password" name="password" class="w-full px-4 py-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500" required>
+            </div>
+            <button type="submit" class="w-full bg-purple-600 text-white py-3 rounded-lg font-bold hover:bg-purple-700 transition">Login</button>
+        </form>
+        {% if error %}
+        <div class="mt-4 p-3 bg-red-100 text-red-700 rounded-lg text-center">{{error}}</div>
+        {% endif %}
+    </div>
+</body>
+</html>
+"""
+
+ADMIN_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -381,14 +361,20 @@ HTML_TEMPLATE = """
     <div class="flex h-screen">
         <div class="w-64 bg-gray-900 text-white p-5">
             <h1 class="text-2xl font-bold mb-8"><i class="fas fa-layer-group mr-2"></i>ICP Classifier</h1>
+            <div class="mb-6 pb-4 border-b border-gray-700">
+                <div class="text-sm text-gray-400">Logged in as</div>
+                <div class="font-bold">Admin</div>
+            </div>
             <nav class="space-y-2">
-                <a href="/admin" class="block py-3 px-4 rounded hover:bg-gray-800"><i class="fas fa-chart-pie mr-2"></i>Dashboard</a>
-                <a href="/admin/leads" class="block py-3 px-4 rounded hover:bg-gray-800"><i class="fas fa-users mr-2"></i>Leads</a>
-                <a href="/admin/clients" class="block py-3 px-4 rounded hover:bg-gray-800"><i class="fas fa-building mr-2"></i>Clients</a>
-                <a href="/admin/integrations" class="block py-3 px-4 rounded hover:bg-gray-800"><i class="fas fa-plug mr-2"></i>Integrations</a>
-                <a href="/admin/import" class="block py-3 px-4 rounded hover:bg-gray-800"><i class="fas fa-file-import mr-2"></i>Import</a>
-                <a href="/admin/logs" class="block py-3 px-4 rounded hover:bg-gray-800"><i class="fas fa-history mr-2"></i>Logs</a>
+                <a href="/admin/dashboard" class="block py-3 px-4 rounded hover:bg-gray-800 {% if page == 'dashboard' %}bg-purple-700{% endif %}"><i class="fas fa-chart-pie mr-2"></i>Dashboard</a>
+                <a href="/admin/leads" class="block py-3 px-4 rounded hover:bg-gray-800 {% if page == 'leads' %}bg-purple-700{% endif %}"><i class="fas fa-users mr-2"></i>Leads</a>
+                <a href="/admin/clients" class="block py-3 px-4 rounded hover:bg-gray-800 {% if page == 'clients' %}bg-purple-700{% endif %}"><i class="fas fa-building mr-2"></i>Clients</a>
+                <a href="/admin/integrations" class="block py-3 px-4 rounded hover:bg-gray-800 {% if page == 'integrations' %}bg-purple-700{% endif %}"><i class="fas fa-plug mr-2"></i>Integrations</a>
+                <a href="/admin/logs" class="block py-3 px-4 rounded hover:bg-gray-800 {% if page == 'logs' %}bg-purple-700{% endif %}"><i class="fas fa-history mr-2"></i>Activity Logs</a>
             </nav>
+            <div class="mt-auto pt-4 border-t border-gray-700">
+                <a href="/admin/logout" class="block py-2 px-4 rounded text-red-400 hover:bg-gray-800"><i class="fas fa-sign-out-alt mr-2"></i>Logout</a>
+            </div>
         </div>
         <div class="flex-1 overflow-auto p-8">
             {{content}}
@@ -398,9 +384,13 @@ HTML_TEMPLATE = """
 </html>
 """
 
+def render_admin(page: str, content: str) -> HTMLResponse:
+    return HTMLResponse(content=ADMIN_TEMPLATE.replace("{{content}}", f'<h1 class="text-3xl font-bold mb-6">{page.title()}</h1>' + content).replace("{{page}}", page))
 
-def render_page(title: str, content: str) -> HTMLResponse:
-    return HTMLResponse(content=HTML_TEMPLATE.replace("{{content}}", f'<h1 class="text-3xl font-bold mb-6">{title}</h1>' + content))
+
+@app.get("/")
+def root():
+    return {"message": "ICP Classifier API", "docs": "/docs", "admin": "/admin/login"}
 
 
 @app.get("/health")
@@ -408,8 +398,35 @@ def health_check():
     return {"status": "healthy", "clients": len(client_configs)}
 
 
-@app.get("/admin")
-def dashboard():
+@app.get("/admin/login")
+def login_page(error: str = ""):
+    return HTMLResponse(content=LOGIN_PAGE.replace("{{error}}", error))
+
+
+@app.post("/admin/login")
+def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT password_hash FROM admin_users WHERE username = ?", (username,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0] == hash_password(password):
+        request.session["authenticated"] = True
+        request.session["username"] = username
+        return HTMLResponse(content='<script>window.location.href="/admin/dashboard";</script>')
+    return HTMLResponse(content=LOGIN_PAGE.replace("{{error}}", "Invalid username or password"))
+
+
+@app.get("/admin/logout")
+def logout(request: Request):
+    request.session.clear()
+    return HTMLResponse(content='<script>window.location.href="/admin/login";</script>')
+
+
+@app.get("/admin/dashboard")
+def dashboard(request: Request):
+    if not verify_session(request):
+        return HTMLResponse(content='<script>window.location.href="/admin/login";</script>')
     stats = get_dashboard_stats()
     content = f"""
     <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
@@ -419,15 +436,15 @@ def dashboard():
             <div class="text-green-500 text-sm mt-2">{stats['last_7_days']} this week</div>
         </div>
         <div class="bg-white p-6 rounded-lg shadow">
-            <div class="text-gray-500 text-sm">Tier 1 Leads</div>
+            <div class="text-gray-500 text-sm">Tier 1 (Hot)</div>
             <div class="text-3xl font-bold text-green-600">{stats['tier1']}</div>
         </div>
         <div class="bg-white p-6 rounded-lg shadow">
-            <div class="text-gray-500 text-sm">Tier 2 Leads</div>
+            <div class="text-gray-500 text-sm">Tier 2 (Warm)</div>
             <div class="text-3xl font-bold text-yellow-600">{stats['tier2']}</div>
         </div>
         <div class="bg-white p-6 rounded-lg shadow">
-            <div class="text-gray-500 text-sm">Pushed to CRM</div>
+            <div class="text-gray-500 text-sm">CRM Pushed</div>
             <div class="text-3xl font-bold">{stats['hubspot_pushed'] + stats['salesforce_pushed']}</div>
         </div>
     </div>
@@ -437,28 +454,21 @@ def dashboard():
     """
     for t in stats["tier_dist"]:
         pct = (t["count"] / stats["total_leads"] * 100) if stats["total_leads"] > 0 else 0
-        content += f"""
-            <div class="mb-3">
-                <div class="flex justify-between text-sm"><span>{t['tier']}</span><span>{t['count']} ({pct:.1f}%)</span></div>
-                <div class="w-full bg-gray-200 rounded-full h-2 mt-1"><div class="bg-purple-600 h-2 rounded-full" style="width: {pct}%"></div></div>
-            </div>"""
-    content += """
-        </div>
-        <div class="bg-white p-6 rounded-lg shadow">
-            <h3 class="text-lg font-bold mb-4">Top Clients</h3>
-    """
+        content += f'<div class="mb-3"><div class="flex justify-between text-sm"><span>{t["tier"]}</span><span>{t["count"]} ({pct:.1f}%)</span></div><div class="w-full bg-gray-200 rounded-full h-2 mt-1"><div class="bg-purple-600 h-2 rounded-full" style="width:{pct}%"></div></div></div>'
+    content += "</div><div class='bg-white p-6 rounded-lg shadow'><h3 class='text-lg font-bold mb-4'>Top Clients</h3>"
     for c in stats["top_clients"]:
         content += f'<div class="flex justify-between p-2 bg-gray-50 rounded mb-2"><span>{c["client_id"]}</span><span class="font-bold">{c["count"]}</span></div>'
     content += "</div></div>"
-    return render_page("Dashboard", content)
+    return render_admin("dashboard", content)
 
 
 @app.get("/admin/leads")
-def leads_page(page: int = 1, search: str = "", tier: str = ""):
-    offset = (page - 1) * 20
+def leads(request: Request, search: str = "", tier: str = ""):
+    if not verify_session(request):
+        return HTMLResponse(content='<script>window.location.href="/admin/login";</script>')
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    query = "SELECT id, client_id, company, email, first_name, last_name, title, score, tier, confidence, recommended_action, pushed_to_hubspot, pushed_to_salesforce, created_at FROM leads WHERE 1=1"
+    query = "SELECT id, client_id, company, email, first_name, last_name, title, score, tier, confidence, recommended_action, pushed_to_hubspot, pushed_to_salesforce FROM leads WHERE 1=1"
     params = []
     if search:
         query += " AND (company LIKE ? OR email LIKE ?)"
@@ -466,193 +476,175 @@ def leads_page(page: int = 1, search: str = "", tier: str = ""):
     if tier:
         query += " AND tier = ?"
         params.append(tier)
-    query += " ORDER BY created_at DESC LIMIT 20 OFFSET ?"
-    params.append(offset)
+    query += " ORDER BY id DESC LIMIT 50"
     c.execute(query, params)
     rows = c.fetchall()
-    c.execute("SELECT COUNT(*) FROM leads")
-    total = c.fetchone()[0]
     conn.close()
     content = f"""
     <div class="mb-4 flex gap-4">
-        <input type="text" id="search" placeholder="Search company or email..." class="px-4 py-2 border rounded-lg w-64" value="{search}">
-        <select id="tierFilter" class="px-4 py-2 border rounded-lg">
-            <option value="">All Tiers</option>
+        <input type="text" id="search" placeholder="Search..." class="px-4 py-2 border rounded-lg" value="{search}">
+        <select id="tier" class="px-4 py-2 border rounded-lg">
+            <option value="">All</option>
             <option value="Tier 1" {'selected' if tier=='Tier 1' else ''}>Tier 1</option>
             <option value="Tier 2" {'selected' if tier=='Tier 2' else ''}>Tier 2</option>
             <option value="Not ICP" {'selected' if tier=='Not ICP' else ''}>Not ICP</option>
         </select>
     </div>
-    <div class="bg-white rounded-lg shadow overflow-hidden">
+    <div class="bg-white rounded-lg shadow overflow-x">
         <table class="w-full">
             <thead class="bg-gray-50">
                 <tr>
-                    <th class="px-6 py-3 text-left">Company</th>
-                    <th class="px-6 py-3 text-left">Contact</th>
-                    <th class="px-6 py-3 text-left">Tier</th>
-                    <th class="px-6 py-3 text-left">Score</th>
-                    <th class="px-6 py-3 text-left">Action</th>
-                    <th class="px-6 py-3 text-left">CRM</th>
+                    <th class="px-4 py-3 text-left">Company</th>
+                    <th class="px-4 py-3 text-left">Contact</th>
+                    <th class="px-4 py-3 text-left">Tier</th>
+                    <th class="px-4 py-3 text-left">Score</th>
+                    <th class="px-4 py-3 text-left">Action</th>
+                    <th class="px-4 py-3 text-left">CRM</th>
                 </tr>
             </thead>
             <tbody>"""
     for r in rows:
-        hubspot_icon = '<i class="fab fa-hubspot text-orange-500"></i>' if r[11] else '<span class="text-gray-300">-</span>'
-        sf_icon = '<i class="fab fa-salesforce text-blue-500"></i>' if r[12] else '<span class="text-gray-300">-</span>'
-        tier_class = "bg-green-100 text-green-800" if r[8] == "Tier 1" else ("bg-yellow-100 text-yellow-800" if r[8] == "Tier 2" else "bg-gray-100 text-gray-800")
-        content += f"""<tr class="border-t hover:bg-gray-50">
-            <td class="px-6 py-4">{r[2]}</td>
-            <td class="px-6 py-4">{r[4] or ''} {r[5] or ''}<br><span class="text-gray-500 text-sm">{r[6] or ''}</span></td>
-            <td class="px-6 py-4"><span class="px-2 py-1 rounded text-sm {tier_class}">{r[8]}</span></td>
-            <td class="px-6 py-4">{r[7]}</td>
-            <td class="px-6 py-4">{r[10]}</td>
-            <td class="px-6 py-4">{hubspot_icon} {sf_icon}</td>
+        hubspot = '<i class="fab fa-hubspot text-orange-500"></i>' if r[11] else '-'
+        sf = '<i class="fab fa-salesforce text-blue-500"></i>' if r[12] else '-'
+        tier_cls = "bg-green-100 text-green-800" if r[8] == "Tier 1" else ("bg-yellow-100 text-yellow-800" if r[8] == "Tier 2" else "bg-gray-100 text-gray-800")
+        content += f"""<tr class="border-t">
+            <td class="px-4 py-3">{r[2]}</td>
+            <td class="px-4 py-3">{r[4] or ''} {r[5] or ''}<br><span class="text-gray-500 text-sm">{r[6] or ''}</span></td>
+            <td class="px-4 py-3"><span class="px-2 py-1 rounded text-sm {tier_cls}">{r[8]}</span></td>
+            <td class="px-4 py-3">{r[7]}</td>
+            <td class="px-4 py-3">{r[10]}</td>
+            <td class="px-4 py-3">{hubspot} {sf}</td>
         </tr>"""
-    content += f"""
-            </tbody>
-        </table>
-    </div>
-    <div class="mt-4 text-gray-600">Total leads: {total}</div>
-    """
-    return render_page("Leads", content)
+    content += "</tbody></table></div>"
+    return render_admin("leads", content)
 
 
 @app.get("/admin/clients")
-def clients_page():
+def clients(request: Request):
+    if not verify_session(request):
+        return HTMLResponse(content='<script>window.location.href="/admin/login";</script>')
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("SELECT client_id, config_json, updated_at FROM client_configs")
     rows = c.fetchall()
+    c.execute("SELECT client_id, route_to_hubspot, route_to_salesforce FROM routing_config")
+    routing = {r[0]: {"hubspot": r[1], "salesforce": r[2]} for r in c.fetchall()}
     conn.close()
-    content = '<div class="mb-4"><button class="px-4 py-2 bg-purple-600 text-white rounded-lg">+ Add Client</button></div><div class="grid grid-cols-1 md:grid-cols-2 gap-6">'
+    content = '<div class="grid grid-cols-1 md:grid-cols-2 gap-6">'
     for r in rows:
         config = json.loads(r[1])
+        rt = routing.get(r[0], {"hubspot": 0, "salesforce": 0})
         content += f"""<div class="bg-white p-6 rounded-lg shadow">
-            <h3 class="text-xl font-bold">{r[0]}</h3>
-            <p class="text-gray-500 text-sm">Updated: {r[2][:10]}</p>
-            <div class="mt-4 grid grid-cols-2 gap-2 text-sm">
-                <div><span class="text-gray-500">Industries:</span> {len(config.get('target_industries', []))}</div>
+            <div class="flex justify-between items-start">
+                <h3 class="text-xl font-bold">{r[0]}</h3>
+                <span class="text-gray-400 text-sm">{r[2][:10]}</span>
+            </div>
+            <div class="mt-4 space-y-2 text-sm">
+                <div><span class="text-gray-500">Industries:</span> {', '.join(config.get('target_industries', []))}</div>
+                <div><span class="text-gray-500">Headcount:</span> {config.get('hc_min', 0)} - {config.get('hc_max', 0)}</div>
                 <div><span class="text-gray-500">T1 Threshold:</span> {config.get('t1_threshold', 70)}</div>
+                <div><span class="text-gray-500">HubSpot:</span> {'<i class="fas fa-check text-green-500"></i>' if rt['hubspot'] else '<i class="fas fa-times text-red-400"></i>'}</div>
+                <div><span class="text-gray-500">Salesforce:</span> {'<i class="fas fa-check text-green-500"></i>' if rt['salesforce'] else '<i class="fas fa-times text-red-400"></i>'}</div>
             </div>
         </div>"""
     content += "</div>"
-    return render_page("Clients", content)
+    return render_admin("clients", content)
 
 
 @app.get("/admin/integrations")
-def integrations_page():
+def integrations(request: Request):
+    if not verify_session(request):
+        return HTMLResponse(content='<script>window.location.href="/admin/login";</script>')
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("SELECT name, status FROM integrations")
+    c.execute("SELECT name, status, config_json FROM integrations")
     rows = c.fetchall()
     conn.close()
-    status_map = {r[0]: r[1] for r in rows}
-    content = """
+    status = {r[0]: {"status": r[1], "config": json.loads(r[2]) if r[2] else {}} for r in rows}
+    apollo_st = status.get("apollo", {}).get("status", "disconnected")
+    hubspot_st = status.get("hubspot", {}).get("status", "disconnected")
+    sf_st = status.get("salesforce", {}).get("status", "disconnected")
+    content = f"""
     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div class="bg-white p-6 rounded-lg shadow">
             <div class="flex items-center justify-between mb-4">
-                <h3 class="text-xl font-bold"><i class="fab fa-apollo text-2xl mr-2"></i>Apollo</h3>
-                <span class="px-3 py-1 rounded-full text-sm bg-green-100 text-green-800">""" + status_map.get("apollo", "disconnected") + """</span>
+                <h3 class="text-xl font-bold"><i class="fas fa-database mr-2"></i>Apollo</h3>
+                <span class="px-3 py-1 rounded-full text-sm {'bg-green-100 text-green-800' if apollo_st=='connected' else 'bg-gray-100 text-gray-600'}">{apollo_st}</span>
             </div>
-            <button class="w-full py-2 bg-purple-600 text-white rounded-lg">Configure</button>
+            <p class="text-gray-600 text-sm mb-4">Lead enrichment and webhook integration</p>
+            <div class="text-sm">
+                <div class="flex justify-between py-2 border-b"><span>API Key</span><span class="text-green-500">{'Configured' if APOLLO_API_KEY else 'Missing'}</span></div>
+            </div>
         </div>
         <div class="bg-white p-6 rounded-lg shadow">
             <div class="flex items-center justify-between mb-4">
-                <h3 class="text-xl font-bold"><i class="fab fa-hubspot text-2xl mr-2" style="color:#ff7a59"></i>HubSpot</h3>
-                <span class="px-3 py-1 rounded-full text-sm bg-green-100 text-green-800">""" + status_map.get("hubspot", "disconnected") + """</span>
+                <h3 class="text-xl font-bold"><i class="fab fa-hubspot mr-2" style="color:#ff7a59"></i>HubSpot</h3>
+                <span class="px-3 py-1 rounded-full text-sm {'bg-green-100 text-green-800' if hubspot_st=='connected' else 'bg-gray-100 text-gray-600'}">{hubspot_st}</span>
             </div>
-            <button class="w-full py-2 bg-purple-600 text-white rounded-lg">Configure</button>
+            <p class="text-gray-600 text-sm mb-4">Push leads to HubSpot contacts</p>
+            <div class="text-sm">
+                <div class="flex justify-between py-2 border-b"><span>API Key</span><span class="text-green-500">{'Configured' if HUBSPOT_API_KEY else 'Missing'}</span></div>
+            </div>
         </div>
         <div class="bg-white p-6 rounded-lg shadow">
             <div class="flex items-center justify-between mb-4">
-                <h3 class="text-xl font-bold"><i class="fab fa-salesforce text-2xl mr-2" style="color:#00a1e0"></i>Salesforce</h3>
-                <span class="px-3 py-1 rounded-full text-sm bg-green-100 text-green-800">""" + status_map.get("salesforce", "disconnected") + """</span>
+                <h3 class="text-xl font-bold"><i class="fab fa-salesforce mr-2" style="color:#00a1e0"></i>Salesforce</h3>
+                <span class="px-3 py-1 rounded-full text-sm {'bg-green-100 text-green-800' if sf_st=='connected' else 'bg-gray-100 text-gray-600'}">{sf_st}</span>
             </div>
-            <button class="w-full py-2 bg-purple-600 text-white rounded-lg">Configure</button>
+            <p class="text-gray-600 text-sm mb-4">Push leads to Salesforce contacts</p>
+            <div class="text-sm">
+                <div class="flex justify-between py-2 border-b"><span>Instance URL</span><span class="text-green-500">{'Configured' if SALESFORCE_INSTANCE_URL else 'Missing'}</span></div>
+                <div class="flex justify-between py-2 border-b"><span>Access Token</span><span class="text-green-500">{'Configured' if SALESFORCE_ACCESS_TOKEN else 'Missing'}</span></div>
+            </div>
         </div>
     </div>"""
-    return render_page("Integrations", content)
-
-
-@app.get("/admin/import")
-def import_page():
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    c.execute("SELECT client_id FROM client_configs")
-    clients = [r[0] for r in c.fetchall()]
-    conn.close()
-    options = "".join([f'<option value="{c}">{c}</option>' for c in clients])
-    content = f"""
-    <div class="bg-white p-8 rounded-lg shadow">
-        <h3 class="text-xl font-bold mb-4">Import Leads from Apollo</h3>
-        <form class="space-y-4">
-            <div><label class="block text-sm font-medium mb-2">Select Client</label>
-            <select class="w-full px-4 py-2 border rounded-lg">{options}</select></div>
-            <div><label class="block text-sm font-medium mb-2">Upload CSV</label>
-            <input type="file" accept=".csv" class="w-full px-4 py-2 border rounded-lg"></div>
-            <button type="button" class="px-6 py-2 bg-purple-600 text-white rounded-lg">Import & Classify</button>
-        </form>
-    </div>"""
-    return render_page("Import Leads", content)
+    return render_admin("integrations", content)
 
 
 @app.get("/admin/logs")
-def logs_page():
+def logs(request: Request):
+    if not verify_session(request):
+        return HTMLResponse(content='<script>window.location.href="/admin/login";</script>')
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("SELECT action, details, lead_id, client_id, status, created_at FROM activity_logs ORDER BY created_at DESC LIMIT 100")
     rows = c.fetchall()
     conn.close()
-    content = """
-    <div class="bg-white rounded-lg shadow overflow-hidden">
-        <table class="w-full">
-            <thead class="bg-gray-50">
-                <tr>
-                    <th class="px-6 py-3 text-left">Action</th>
-                    <th class="px-6 py-3 text-left">Details</th>
-                    <th class="px-6 py-3 text-left">Status</th>
-                    <th class="px-6 py-3 text-left">Time</th>
-                </tr>
-            </thead>
-            <tbody>"""
+    content = '<div class="bg-white rounded-lg shadow overflow-x"><table class="w-full"><thead class="bg-gray-50"><tr><th class="px-4 py-3 text-left">Action</th><th class="px-4 py-3 text-left">Details</th><th class="px-4 py-3 text-left">Lead</th><th class="px-4 py-3 text-left">Client</th><th class="px-4 py-3 text-left">Status</th><th class="px-4 py-3 text-left">Time</th></tr></thead><tbody>'
     for r in rows:
-        status_class = "text-green-600" if r[4] == "success" else "text-red-600"
+        status_cls = "text-green-600" if r[4] == "success" else "text-red-600"
         content += f"""<tr class="border-t">
-            <td class="px-6 py-4 font-medium">{r[0]}</td>
-            <td class="px-6 py-4 text-gray-600">{r[1]}</td>
-            <td class="px-6 py-4 {status_class}">{r[4]}</td>
-            <td class="px-6 py-4 text-gray-500">{r[5]}</td>
+            <td class="px-4 py-3 font-medium">{r[0]}</td>
+            <td class="px-4 py-3 text-gray-600">{r[1] or '-'}</td>
+            <td class="px-4 py-3">{r[2] or '-'}</td>
+            <td class="px-4 py-3">{r[3] or '-'}</td>
+            <td class="px-4 py-3 {status_cls}">{r[4]}</td>
+            <td class="px-4 py-3 text-gray-500">{r[5]}</td>
         </tr>"""
     content += "</tbody></table></div>"
-    return render_page("Activity Logs", content)
+    return render_admin("logs", content)
 
 
 @app.post("/classify")
-def classify(request: dict, authorization: Optional[str] = Header(None)):
-    verify_api_key(authorization)
-    client_config = request.get("client_config")
+def classify(request: dict):
     client_id = request.get("client_id")
     lead = request.get("lead")
     if not lead:
         raise HTTPException(status_code=400, detail="Missing lead")
-    if client_config:
-        config = client_config
-    elif client_id and client_id in client_configs:
+    if client_id and client_id in client_configs:
         config = client_configs[client_id]
     else:
-        raise HTTPException(status_code=400, detail="Provide client_config or valid client_id")
+        raise HTTPException(status_code=400, detail="Invalid client_id")
     result = _classify(config, lead)
     if request.get("route", {}).get("save_to_db", True):
-        route_result = route_lead(client_id or config.get("client_id", "unknown"), lead, result)
+        route_result = route_lead(client_id, lead, result)
         result["lead_id"] = route_result["lead_id"]
         result["hubspot_contact_id"] = route_result["hubspot_contact_id"]
-        result["salesforce_contact_id"] = route_result["salesforce_contact_id"]
     return result
 
 
 @app.post("/admin/api-keys")
-def create_api_key(data: dict, authorization: Optional[str] = Header(None)):
-    verify_api_key(authorization)
+def create_api_key(data: dict):
     key = secrets.token_urlsafe(32)
     API_KEYS[key] = True
     conn = sqlite3.connect(db_path)
@@ -660,12 +652,11 @@ def create_api_key(data: dict, authorization: Optional[str] = Header(None)):
     c.execute("INSERT INTO api_keys (key_hash, label) VALUES (?, ?)", (key, data.get("label", "unnamed")))
     conn.commit()
     conn.close()
-    return {"api_key": key, "label": data.get("label", "unnamed")}
+    return {"api_key": key}
 
 
 @app.post("/admin/client-configs")
-def save_client_config(data: dict, authorization: Optional[str] = Header(None)):
-    verify_api_key(authorization)
+def save_client_config(data: dict):
     client_id = data.get("client_id")
     config = data.get("config")
     if not client_id or not config:
@@ -677,66 +668,36 @@ def save_client_config(data: dict, authorization: Optional[str] = Header(None)):
               (client_id, json.dumps(config), datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
-    log_activity("config_updated", f"Updated config for {client_id}", client_id=client_id)
+    log_activity("config_updated", f"Updated: {client_id}", client_id=client_id)
     return {"status": "saved", "client_id": client_id}
-
-
-@app.get("/admin/client-configs/{client_id}")
-def get_client_config(client_id: str, authorization: Optional[str] = Header(None)):
-    verify_api_key(authorization)
-    if client_id not in client_configs:
-        raise HTTPException(status_code=404, detail="Client not found")
-    return client_configs[client_id]
 
 
 @app.post("/admin/routing")
-def save_routing(data: dict, authorization: Optional[str] = Header(None)):
-    verify_api_key(authorization)
+def save_routing(data: dict):
     client_id = data.get("client_id")
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("""INSERT OR REPLACE INTO routing_config 
-        (client_id, route_to_db, route_to_hubspot, hubspot_pipeline, hubspot_stage, 
-         route_to_salesforce, salesforce_account_id, salesforce_contact_owner_id, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (client_id, int(data.get("route_to_db", True)), int(data.get("route_to_hubspot", False)),
-         data.get("hubspot_pipeline", ""), data.get("hubspot_stage", ""),
-         int(data.get("route_to_salesforce", False)), data.get("salesforce_account_id", ""),
-         data.get("salesforce_contact_owner_id", ""), datetime.utcnow().isoformat()))
+    c.execute("""INSERT OR REPLACE INTO routing_config (client_id, route_to_db, route_to_hubspot, hubspot_pipeline, hubspot_stage, route_to_salesforce, salesforce_account_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (client_id, int(data.get("route_to_db", 1)), int(data.get("route_to_hubspot", 0)), data.get("hubspot_pipeline", ""), data.get("hubspot_stage", ""), int(data.get("route_to_salesforce", 0)), data.get("salesforce_account_id", ""), datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
-    log_activity("routing_updated", f"Updated routing for {client_id}", client_id=client_id)
-    return {"status": "saved", "client_id": client_id}
+    log_activity("routing_updated", f"Updated: {client_id}", client_id=client_id)
+    return {"status": "saved"}
 
 
 @app.get("/admin/stats")
-def get_stats(authorization: Optional[str] = Header(None)):
-    verify_api_key(authorization)
+def get_stats():
     return get_dashboard_stats()
 
 
 @app.get("/admin/leads-api")
-def leads_api(authorization: Optional[str] = Header(None)):
-    verify_api_key(authorization)
+def leads_api():
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("SELECT id, client_id, company, email, score, tier, confidence, action, hubspot, salesforce, created_at FROM (SELECT l.id, l.client_id, l.company, l.email, l.score, l.tier, l.confidence, l.recommended_action as action, l.pushed_to_hubspot as hubspot, l.pushed_to_salesforce as salesforce, l.created_at FROM leads ORDER BY l.created_at DESC LIMIT 100)")
+    c.execute("SELECT id, client_id, company, email, score, tier, confidence, recommended_action FROM leads ORDER BY id DESC LIMIT 100")
     rows = c.fetchall()
     conn.close()
-    return [{"id": r[0], "client_id": r[1], "company": r[2], "email": r[3], "score": r[4], "tier": r[5], "confidence": r[6], "action": r[7], "hubspot": bool(r[8]), "salesforce": bool(r[9]), "created_at": r[10]} for r in rows]
-
-
-@app.get("/admin/lead/{lead_id}")
-def get_lead(lead_id: str, authorization: Optional[str] = Header(None)):
-    verify_api_key(authorization)
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    c.execute("SELECT * FROM leads WHERE id = ?", (lead_id,))
-    row = c.fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    return {"id": row[0], "client_id": row[1], "data": {"company": row[3], "domain": row[4], "industry": row[5], "headcount": row[6], "funding_stage": row[7], "hq_country": row[8], "tech_stack": json.loads(row[10] or "[]"), "job_signals": json.loads(row[11] or "[]"), "email": row[12], "first_name": row[13], "last_name": row[14], "title": row[15]}, "classification": {"score": row[17], "tier": row[18], "confidence": row[19], "action": row[20], "signal_breakdown": json.loads(row[21] or "{}"), "reasons": json.loads(row[22] or "[]")}, "integrations": {"hubspot_id": row[24], "salesforce_id": row[26]}}
+    return [{"id": r[0], "client_id": r[1], "company": r[2], "email": r[3], "score": r[4], "tier": r[5], "confidence": r[6], "action": r[7]} for r in rows]
 
 
 if __name__ == "__main__":
