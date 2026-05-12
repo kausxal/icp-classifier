@@ -393,7 +393,48 @@ def render_admin(page: str, content: str) -> HTMLResponse:
 
 @app.get("/")
 def root():
-    return {"message": "ICP Classifier API", "docs": "/docs", "admin": "/admin/login"}
+    return dashboard_no_auth()
+
+
+@app.get("/index")
+def index():
+    return dashboard_no_auth()
+
+
+def dashboard_no_auth():
+    stats = get_dashboard_stats()
+    content = f"""
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div class="bg-white p-6 rounded-lg shadow">
+            <div class="text-gray-500 text-sm">Total Leads</div>
+            <div class="text-3xl font-bold">{stats['total_leads']}</div>
+            <div class="text-green-500 text-sm mt-2">{stats['last_7_days']} this week</div>
+        </div>
+        <div class="bg-white p-6 rounded-lg shadow">
+            <div class="text-gray-500 text-sm">Tier 1 (Hot)</div>
+            <div class="text-3xl font-bold text-green-600">{stats['tier1']}</div>
+        </div>
+        <div class="bg-white p-6 rounded-lg shadow">
+            <div class="text-gray-500 text-sm">Tier 2 (Warm)</div>
+            <div class="text-3xl font-bold text-yellow-600">{stats['tier2']}</div>
+        </div>
+        <div class="bg-white p-6 rounded-lg shadow">
+            <div class="text-gray-500 text-sm">CRM Pushed</div>
+            <div class="text-3xl font-bold">{stats['hubspot_pushed'] + stats['salesforce_pushed']}</div>
+        </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="bg-white p-6 rounded-lg shadow">
+            <h3 class="text-lg font-bold mb-4">Tier Distribution</h3>
+    """
+    for t in stats["tier_dist"]:
+        pct = (t["count"] / stats["total_leads"] * 100) if stats["total_leads"] > 0 else 0
+        content += f'<div class="mb-3"><div class="flex justify-between text-sm"><span>{t["tier"]}</span><span>{t["count"]} ({pct:.1f}%)</span></div><div class="w-full bg-gray-200 rounded-full h-2 mt-1"><div class="bg-purple-600 h-2 rounded-full" style="width:{pct}%"></div></div></div>'
+    content += "</div><div class='bg-white p-6 rounded-lg shadow'><h3 class='text-lg font-bold mb-4'>Top Clients</h3>"
+    for c in stats["top_clients"]:
+        content += f'<div class="flex justify-between p-2 bg-gray-50 rounded mb-2"><span>{c["client_id"]}</span><span class="font-bold">{c["count"]}</span></div>'
+    content += "</div></div>"
+    return render_admin("Dashboard", content)
 
 
 @app.get("/health")
