@@ -1,111 +1,20 @@
-import { useState, useEffect, createContext, useContext } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { useState, useEffect } from 'react'
+import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 
 const API_BASE = import.meta.env.VITE_API_URL || window.location.origin
 
-const AuthContext = createContext(null)
-
-export function useAuth() {
-  return useContext(AuthContext)
-}
-
 function App() {
-  const [user, setUser] = useState(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    const savedUser = localStorage.getItem('icp_user')
-    if (savedUser) {
-      setUser(JSON.parse(savedUser))
-    }
-    setLoading(false)
-  }, [])
-
-  const login = async (username, password) => {
-    try {
-      const res = await fetch(`${API_BASE}/admin/api/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-        credentials: 'include'
-      })
-      const data = await res.json()
-      if (data.success) {
-        const userData = { username }
-        setUser(userData)
-        localStorage.setItem('icp_user', JSON.stringify(userData))
-        return { success: true }
-      }
-      return { success: false, error: data.error || 'Invalid credentials' }
-    } catch (err) {
-      return { success: false, error: err.message }
-    }
-  }
-
-  const logout = () => {
-    setUser(null)
-    localStorage.removeItem('icp_user')
-  }
-
-  if (loading) {
-    return <div className="flex items-center justify-center h-screen">Loading...</div>
-  }
-
+  // No login required - dashboard is public
   return (
-    <AuthContext.Provider value={{ user, login, logout }}>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={!user ? <Login /> : <Navigate to="/dashboard" />} />
-          <Route path="/*" element={user ? <Layout /> : <Navigate to="/login" />} />
-        </Routes>
-      </BrowserRouter>
-    </AuthContext.Provider>
-  )
-}
-
-function Login() {
-  const { login } = useAuth()
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-
-  const handleSubmit = async (e) => {
-    e.preventDefault()
-    setLoading(true)
-    setError('')
-    const username = e.target.username.value
-    const password = e.target.password.value
-    const result = await login(username, password)
-    setLoading(false)
-    if (!result.success) {
-      setError(result.error)
-    }
-  }
-
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-600 to-indigo-700 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
-        <h1 className="text-3xl font-bold text-center mb-8 text-gray-800">ICP Classifier</h1>
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div>
-            <label className="block text-gray-700 text-sm font-bold mb-2">Username</label>
-            <input type="text" name="username" required className="w-full px-4 py-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500" />
-          </div>
-          <div>
-            <label className="block text-gray-700 text-sm font-bold mb-2">Password</label>
-            <input type="password" name="password" required className="w-full px-4 py-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500" />
-          </div>
-          {error && <div className="p-3 bg-red-100 text-red-700 rounded-lg text-center">{error}</div>}
-          <button type="submit" disabled={loading} className="w-full bg-purple-600 text-white py-3 rounded-lg font-bold hover:bg-purple-700 transition disabled:opacity-50">
-            {loading ? 'Logging in...' : 'Login'}
-          </button>
-        </form>
-      </div>
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/*" element={<Layout />} />
+      </Routes>
+    </BrowserRouter>
   )
 }
 
 function Layout() {
-  const { logout, user } = useAuth()
   const location = useLocation()
 
   const navItems = [
@@ -133,9 +42,6 @@ function Layout() {
             </a>
           ))}
         </nav>
-        <button onClick={logout} className="mt-auto py-2 px-4 rounded text-red-400 hover:bg-gray-800 text-left">
-          🚪 Logout
-        </button>
       </div>
       <div className="flex-1 overflow-auto p-8">
         <Routes>
@@ -405,18 +311,9 @@ function Logs() {
 }
 
 function Settings() {
-  const { user } = useAuth()
-
   return (
     <div>
       <h1 className="text-3xl font-bold mb-6">Settings</h1>
-      <div className="bg-white rounded-lg shadow p-6 mb-6">
-        <h3 className="text-lg font-bold mb-4">Admin Account</h3>
-        <div className="text-sm">
-          <div className="py-2 border-b"><span className="text-gray-500">Username:</span> {user?.username}</div>
-          <div className="py-2 border-b"><span className="text-gray-500">Password:</span> Change via environment variables</div>
-        </div>
-      </div>
       <div className="bg-white rounded-lg shadow p-6">
         <h3 className="text-lg font-bold mb-4">Environment Variables</h3>
         <div className="space-y-3">

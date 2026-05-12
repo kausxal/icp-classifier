@@ -171,7 +171,8 @@ load_configs()
 
 
 def verify_session(request: Request) -> bool:
-    return request.session.get("authenticated", False)
+    # Disable authentication - dashboard is public
+    return True
 
 
 def log_activity(action: str, details: str = "", lead_id: str = "", client_id: str = "", status: str = "success"):
