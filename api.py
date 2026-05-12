@@ -437,6 +437,21 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
     return HTMLResponse(content=LOGIN_PAGE.replace("{{error}}", "Invalid username or password"))
 
 
+@app.post("/admin/api/login")
+def api_login(data: dict):
+    username = data.get("username")
+    password = data.get("password")
+    
+    if ADMIN_USERNAME and ADMIN_PASSWORD_HASH:
+        if username == ADMIN_USERNAME and hash_password(password) == ADMIN_PASSWORD_HASH:
+            return {"success": True, "username": username}
+    
+    if password == FALLBACK_ADMIN_PASSWORD and username == "admin":
+        return {"success": True, "username": username}
+    
+    return {"success": False, "error": "Invalid credentials"}
+
+
 @app.get("/admin/logout")
 def logout(request: Request):
     request.session.clear()
@@ -868,9 +883,65 @@ def save_routing(data: dict):
     return {"status": "saved"}
 
 
-@app.get("/admin/stats")
-def get_stats():
+@app.get("/admin/api/stats")
+def api_stats():
     return get_dashboard_stats()
+
+
+@app.get("/admin/api/leads")
+def api_leads(search: str = "", tier: str = ""):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    query = "SELECT id, client_id, company, email, first_name, last_name, title, score, tier, confidence, recommended_action, pushed_to_hubspot, pushed_to_salesforce, created_at FROM leads WHERE 1=1"
+    params = []
+    if search:
+        query += " AND (company LIKE ? OR email LIKE ?)"
+        params.extend([f"%{search}%", f"%{search}%"])
+    if tier:
+        query += " AND tier = ?"
+        params.append(tier)
+    query += " ORDER BY id DESC LIMIT 100"
+    c.execute(query, params)
+    rows = c.fetchall()
+    conn.close()
+    return [{"id": r[0], "client_id": r[1], "company": r[2], "email": r[3], "first_name": r[4], "last_name": r[5], "title": r[6], "score": r[7], "tier": r[8], "confidence": r[9], "recommended_action": r[10], "pushed_to_hubspot": bool(r[11]), "pushed_to_salesforce": bool(r[12]), "created_at": r[13]} for r in rows]
+
+
+@app.get("/admin/api/clients")
+def api_clients():
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT client_id, config_json, updated_at FROM client_configs")
+    rows = c.fetchall()
+    c.execute("SELECT client_id, route_to_hubspot, route_to_salesforce FROM routing_config")
+    routing = {r[0]: {"hubspot": r[1], "salesforce": r[2]} for r in c.fetchall()}
+    conn.close()
+    result = []
+    for r in rows:
+        config = json.loads(r[1])
+        rt = routing.get(r[0], {"hubspot": 0, "salesforce": 0})
+        result.append({
+            "client_id": r[0],
+            "target_industries": config.get("target_industries", []),
+            "hc_min": config.get("hc_min", 0),
+            "hc_max": config.get("hc_max", 0),
+            "t1_threshold": config.get("t1_threshold", 70),
+            "t2_threshold": config.get("t2_threshold", 40),
+            "route_to_hubspot": bool(rt.get("hubspot", 0)),
+            "route_to_salesforce": bool(rt.get("salesforce", 0)),
+            "updated_at": r[2]
+        })
+    return result
+
+
+@app.get("/admin/api/logs")
+def api_logs():
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT action, details, lead_id, client_id, status, created_at FROM activity_logs ORDER BY created_at DESC LIMIT 100")
+    rows = c.fetchall()
+    conn.close()
+    return [{"action": r[0], "details": r[1], "lead_id": r[2], "client_id": r[3], "status": r[4], "created_at": r[5]} for r in rows]
 
 
 @app.get("/admin/leads-api")

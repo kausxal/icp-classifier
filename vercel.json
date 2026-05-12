@@ -8,6 +8,10 @@
   ],
   "routes": [
     {
+      "src": "/admin/api/(.*)",
+      "dest": "api.py"
+    },
+    {
       "src": "/api/(.*)",
       "dest": "api.py"
     },

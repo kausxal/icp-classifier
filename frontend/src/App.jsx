@@ -1,6 +1,5 @@
 import { useState, useEffect, createContext, useContext } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import axios from 'axios'
 
 const API_BASE = ''
 
@@ -24,16 +23,22 @@ function App() {
 
   const login = async (username, password) => {
     try {
-      const res = await axios.post(`${API_BASE}/admin/login`, 
-        new URLSearchParams({ username, password }),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-      )
-      const userData = { username }
-      setUser(userData)
-      localStorage.setItem('icp_user', JSON.stringify(userData))
-      return { success: true }
+      const res = await fetch(`${API_BASE}/admin/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+        credentials: 'include'
+      })
+      const data = await res.json()
+      if (data.success) {
+        const userData = { username }
+        setUser(userData)
+        localStorage.setItem('icp_user', JSON.stringify(userData))
+        return { success: true }
+      }
+      return { success: false, error: data.error || 'Invalid credentials' }
     } catch (err) {
-      return { success: false, error: 'Invalid credentials' }
+      return { success: false, error: err.message }
     }
   }
 
@@ -104,21 +109,13 @@ function Layout() {
   const location = useLocation()
 
   const navItems = [
-    { path: '/dashboard', icon: 'chart-pie', label: 'Dashboard' },
-    { path: '/leads', icon: 'users', label: 'Leads' },
-    { path: '/clients', icon: 'building', label: 'Clients' },
-    { path: '/integrations', icon: 'plug', label: 'Integrations' },
-    { path: '/logs', icon: 'history', label: 'Activity Logs' },
-    { path: '/settings', icon: 'settings', label: 'Settings' },
+    { path: '/dashboard', icon: '📊', label: 'Dashboard' },
+    { path: '/leads', icon: '👥', label: 'Leads' },
+    { path: '/clients', icon: '🏢', label: 'Clients' },
+    { path: '/integrations', icon: '🔌', label: 'Integrations' },
+    { path: '/logs', icon: '📜', label: 'Activity Logs' },
+    { path: '/settings', icon: '⚙️', label: 'Settings' },
   ]
-
-  const getIcon = (name) => {
-    const icons = {
-      'chart-pie': '📊', 'users': '👥', 'building': '🏢', 
-      'plug': '🔌', 'history': '📜', 'settings': '⚙️'
-    }
-    return icons[name] || '•'
-  }
 
   return (
     <div className="flex h-screen">
@@ -130,8 +127,8 @@ function Layout() {
         </div>
         <nav className="flex-1 space-y-2">
           {navItems.map(item => (
-            <a key={item.path} href={item.path} className={`sidebar-link ${location.pathname === item.path ? 'active' : ''}`}>
-              <span className="mr-2">{getIcon(item.icon)}</span>
+            <a key={item.path} href={item.path} className={`block py-3 px-4 rounded hover:bg-gray-800 ${location.pathname === item.path ? 'bg-purple-700' : ''}`}>
+              <span className="mr-2">{item.icon}</span>
               {item.label}
             </a>
           ))}
@@ -159,18 +156,12 @@ function Dashboard() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetchStats()
+    fetch(`${API_BASE}/admin/api/stats`)
+      .then(r => r.json())
+      .then(setStats)
+      .catch(console.error)
+      .finally(() => setLoading(false))
   }, [])
-
-  const fetchStats = async () => {
-    try {
-      const res = await axios.get(`${API_BASE}/admin/stats`)
-      setStats(res.data)
-    } catch (err) {
-      console.error(err)
-    }
-    setLoading(false)
-  }
 
   if (loading) return <div>Loading...</div>
 
@@ -228,21 +219,12 @@ function Leads() {
   const [tier, setTier] = useState('')
 
   useEffect(() => {
-    fetchLeads()
+    fetch(`${API_BASE}/admin/api/leads?search=${search}&tier=${tier}`)
+      .then(r => r.json())
+      .then(setLeads)
+      .catch(console.error)
+      .finally(() => setLoading(false))
   }, [search, tier])
-
-  const fetchLeads = async () => {
-    try {
-      const params = new URLSearchParams()
-      if (search) params.append('search', search)
-      if (tier) params.append('tier', tier)
-      const res = await axios.get(`${API_BASE}/admin/leads?${params}`)
-      setLeads(res.data)
-    } catch (err) {
-      console.error(err)
-    }
-    setLoading(false)
-  }
 
   const getTierClass = (t) => {
     if (t === 'Tier 1') return 'bg-green-100 text-green-800'
@@ -298,56 +280,20 @@ function Leads() {
 function Clients() {
   const [clients, setClients] = useState([])
   const [loading, setLoading] = useState(true)
-  const [showModal, setShowModal] = useState(false)
-  const [formData, setFormData] = useState({
-    client_id: '', target_industries: '', hc_min: 10, hc_max: 500, t1_threshold: 70, t2_threshold: 40,
-    route_to_hubspot: false, route_to_salesforce: false
-  })
 
   useEffect(() => {
-    fetchClients()
+    fetch(`${API_BASE}/admin/api/clients`)
+      .then(r => r.json())
+      .then(setClients)
+      .catch(console.error)
+      .finally(() => setLoading(false))
   }, [])
-
-  const fetchClients = async () => {
-    try {
-      const res = await axios.get(`${API_BASE}/admin/clients`)
-      setClients(res.data)
-    } catch (err) {
-      console.error(err)
-    }
-    setLoading(false)
-  }
-
-  const handleSubmit = async (e) => {
-    e.preventDefault()
-    try {
-      await axios.post(`${API_BASE}/admin/clients/add`, {
-        client_id: formData.client_id,
-        target_industries: formData.target_industries,
-        hc_min: formData.hc_min,
-        hc_max: formData.hc_max,
-        t1_threshold: formData.t1_threshold,
-        t2_threshold: formData.t2_threshold,
-        route_to_hubspot: formData.route_to_hubspot,
-        route_to_salesforce: formData.route_to_salesforce,
-      })
-      setShowModal(false)
-      fetchClients()
-    } catch (err) {
-      alert('Failed to add client')
-    }
-  }
 
   if (loading) return <div>Loading...</div>
 
   return (
     <div>
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-3xl font-bold">Clients</h1>
-        <button onClick={() => setShowModal(true)} className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">
-          + Add Client
-        </button>
-      </div>
+      <h1 className="text-3xl font-bold mb-6">Clients</h1>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {clients.map((client, i) => (
           <div key={i} className="bg-white p-6 rounded-lg shadow">
@@ -367,74 +313,36 @@ function Clients() {
           </div>
         ))}
       </div>
-
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 w-full max-w-lg">
-            <h3 className="text-xl font-bold mb-4">Add New Client</h3>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div><label className="block text-sm font-medium">Client ID</label><input type="text" value={formData.client_id} onChange={e => setFormData({...formData, client_id: e.target.value})} className="w-full px-4 py-2 border rounded-lg" required /></div>
-              <div><label className="block text-sm font-medium">Target Industries (comma separated)</label><input type="text" value={formData.target_industries} onChange={e => setFormData({...formData, target_industries: e.target.value})} placeholder="SaaS, MarTech" className="w-full px-4 py-2 border rounded-lg" required /></div>
-              <div className="grid grid-cols-2 gap-4">
-                <div><label className="block text-sm font-medium">Min Headcount</label><input type="number" value={formData.hc_min} onChange={e => setFormData({...formData, hc_min: parseInt(e.target.value)})} className="w-full px-4 py-2 border rounded-lg" /></div>
-                <div><label className="block text-sm font-medium">Max Headcount</label><input type="number" value={formData.hc_max} onChange={e => setFormData({...formData, hc_max: parseInt(e.target.value)})} className="w-full px-4 py-2 border rounded-lg" /></div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div><label className="block text-sm font-medium">T1 Threshold</label><input type="number" value={formData.t1_threshold} onChange={e => setFormData({...formData, t1_threshold: parseInt(e.target.value)})} className="w-full px-4 py-2 border rounded-lg" /></div>
-                <div><label className="block text-sm font-medium">T2 Threshold</label><input type="number" value={formData.t2_threshold} onChange={e => setFormData({...formData, t2_threshold: parseInt(e.target.value)})} className="w-full px-4 py-2 border rounded-lg" /></div>
-              </div>
-              <div className="flex gap-4">
-                <label className="flex items-center"><input type="checkbox" checked={formData.route_to_hubspot} onChange={e => setFormData({...formData, route_to_hubspot: e.target.checked})} className="mr-2" /> Route to HubSpot</label>
-                <label className="flex items-center"><input type="checkbox" checked={formData.route_to_salesforce} onChange={e => setFormData({...formData, route_to_salesforce: e.target.checked})} className="mr-2" /> Route to Salesforce</label>
-              </div>
-              <div className="flex gap-2 mt-4">
-                <button type="submit" className="px-4 py-2 bg-purple-600 text-white rounded-lg">Save</button>
-                <button type="button" onClick={() => setShowModal(false)} className="px-4 py-2 bg-gray-200 rounded-lg">Cancel</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
 
 function Integrations() {
-  const integrations = [
-    { name: 'Apollo', icon: '🔍', key: 'APOLLO_API_KEY', desc: 'Lead enrichment and webhook integration' },
-    { name: 'HubSpot', icon: '🟠', key: 'HUBSPOT_API_KEY', desc: 'Push leads to HubSpot contacts' },
-    { name: 'Salesforce', icon: '☁️', key: 'SALESFORCE_ACCESS_TOKEN', desc: 'Push leads to Salesforce contacts' },
-  ]
-
-  const envVars = { APOLLO_API_KEY: import.meta.env.VITE_APOLLO_API_KEY, HUBSPOT_API_KEY: import.meta.env.VITE_HUBSPOT_API_KEY }
-
   return (
     <div>
       <h1 className="text-3xl font-bold mb-6">Integrations</h1>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {integrations.map((int, i) => {
-          const isSet = envVars[int.key]
-          return (
-            <div key={i} className="bg-white p-6 rounded-lg shadow">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xl font-bold">{int.icon} {int.name}</h3>
-                <span className={`px-3 py-1 rounded-full text-sm ${isSet ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                  {isSet ? 'Connected' : 'Not Connected'}
-                </span>
-              </div>
-              <p className="text-gray-600 text-sm mb-4">{int.desc}</p>
-              <div className="text-sm">
-                <div className="flex justify-between py-2 border-b">
-                  <span>API Key</span>
-                  <span className={isSet ? 'text-green-500' : 'text-red-500'}>
-                    {isSet ? 'Configured' : 'Set via Environment Variable'}
-                  </span>
-                </div>
-              </div>
-              {!isSet && <p className="text-xs text-gray-400 mt-2">Set {int.key} in Vercel environment variables</p>}
-            </div>
-          )
-        })}
+        <div className="bg-white p-6 rounded-lg shadow">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-xl font-bold">🔍 Apollo</h3>
+            <span className="px-3 py-1 rounded-full text-sm bg-gray-100 text-gray-600">Set via env</span>
+          </div>
+          <p className="text-gray-600 text-sm mb-4">Lead enrichment and webhook integration</p>
+        </div>
+        <div className="bg-white p-6 rounded-lg shadow">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-xl font-bold">🟠 HubSpot</h3>
+            <span className="px-3 py-1 rounded-full text-sm bg-gray-100 text-gray-600">Set via env</span>
+          </div>
+          <p className="text-gray-600 text-sm mb-4">Push leads to HubSpot contacts</p>
+        </div>
+        <div className="bg-white p-6 rounded-lg shadow">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-xl font-bold">☁️ Salesforce</h3>
+            <span className="px-3 py-1 rounded-full text-sm bg-gray-100 text-gray-600">Set via env</span>
+          </div>
+          <p className="text-gray-600 text-sm mb-4">Push leads to Salesforce contacts</p>
+        </div>
       </div>
       <div className="mt-8 bg-blue-50 p-4 rounded-lg">
         <h4 className="font-bold text-blue-800 mb-2">How to Configure</h4>
@@ -454,18 +362,12 @@ function Logs() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetchLogs()
+    fetch(`${API_BASE}/admin/api/logs`)
+      .then(r => r.json())
+      .then(setLogs)
+      .catch(console.error)
+      .finally(() => setLoading(false))
   }, [])
-
-  const fetchLogs = async () => {
-    try {
-      const res = await axios.get(`${API_BASE}/admin/logs`)
-      setLogs(res.data)
-    } catch (err) {
-      console.error(err)
-    }
-    setLoading(false)
-  }
 
   if (loading) return <div>Loading...</div>
 
@@ -504,36 +406,16 @@ function Logs() {
 
 function Settings() {
   const { user } = useAuth()
-  const [currentPassword, setCurrentPassword] = useState('')
-  const [newPassword, setNewPassword] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')
-  const [message, setMessage] = useState('')
-
-  const handlePasswordChange = async (e) => {
-    e.preventDefault()
-    if (newPassword !== confirmPassword) {
-      setMessage('Passwords do not match')
-      return
-    }
-    if (newPassword.length < 6) {
-      setMessage('Password must be at least 6 characters')
-      return
-    }
-    setMessage('Password change not available via frontend - use API')
-  }
 
   return (
     <div>
       <h1 className="text-3xl font-bold mb-6">Settings</h1>
       <div className="bg-white rounded-lg shadow p-6 mb-6">
-        <h3 className="text-lg font-bold mb-4">Change Password</h3>
-        <form onSubmit={handlePasswordChange} className="space-y-4">
-          <div><label className="block text-sm font-medium">Current Password</label><input type="password" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} className="w-full px-4 py-2 border rounded-lg" /></div>
-          <div><label className="block text-sm font-medium">New Password</label><input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} className="w-full px-4 py-2 border rounded-lg" /></div>
-          <div><label className="block text-sm font-medium">Confirm New Password</label><input type="password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} className="w-full px-4 py-2 border rounded-lg" /></div>
-          {message && <div className="p-3 bg-red-100 text-red-700 rounded-lg">{message}</div>}
-          <button type="submit" className="px-6 py-2 bg-purple-600 text-white rounded-lg">Update Password</button>
-        </form>
+        <h3 className="text-lg font-bold mb-4">Admin Account</h3>
+        <div className="text-sm">
+          <div className="py-2 border-b"><span className="text-gray-500">Username:</span> {user?.username}</div>
+          <div className="py-2 border-b"><span className="text-gray-500">Password:</span> Change via environment variables</div>
+        </div>
       </div>
       <div className="bg-white rounded-lg shadow p-6">
         <h3 className="text-lg font-bold mb-4">Environment Variables</h3>
