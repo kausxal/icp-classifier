@@ -4,6 +4,10 @@
     {
       "src": "api.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "frontend/dist",
+      "use": "@vercel/static"
     }
   ],
   "routes": [
@@ -12,11 +16,7 @@
       "dest": "api.py"
     },
     {
-      "src": "/api/(.*)",
-      "dest": "api.py"
-    },
-    {
-      "src": "/admin/(.*)",
+      "src": "/classify",
       "dest": "api.py"
     },
     {
@@ -24,7 +24,7 @@
       "dest": "api.py"
     },
     {
-      "src": "/classify",
+      "src": "/admin/(.*)",
       "dest": "api.py"
     },
     {
@@ -32,8 +32,12 @@
       "dest": "api.py"
     },
     {
-      "src": "/openapi.json",
-      "dest": "api.py"
+      "src": "/(.*)\\.(js|css|png|jpg|jpeg|svg|ico|woff|woff2|ttf)",
+      "dest": "frontend/dist/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "frontend/dist/index.html"
     }
   ]
 }
